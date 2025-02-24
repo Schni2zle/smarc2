@@ -46,13 +46,16 @@ def wrapTo180(angle):
         angle -= 360;
     return angle
 
-def calc_dubins_path(wpt1, wpt2, turn_radius):
+def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
     # Calculate a dubins path between two waypoints
     param = Param(wpt1, 0, 0)
     tz        = [0, 0, 0, 0, 0, 0]
     pz        = [0, 0, 0, 0, 0, 0]
     qz        = [0, 0, 0, 0, 0, 0]
     param.seg_final = [0, 0, 0]
+    param2 = Param(wpt1, 0, 0)
+    param2.seg_final = [0, 0, 0]
+    param2.turn_radius = turn_radius
     psi1 = wrapTo180(wpt1.psi)*math.pi/180
     psi2 = wrapTo180(wpt2.psi)*math.pi/180
 
@@ -79,14 +82,52 @@ def calc_dubins_path(wpt1, wpt2, turn_radius):
     # Pick the path with the lowest cost
     for k in range(len(tz)):
         if(tz[k]!=-1):
-            cost = tz[k] + pz[k] + qz[k]
-            if(cost<lowest_cost or lowest_cost==-1):
+            param2.type = TurnType(k+1)
+            param2.seg_final = [tz[k],pz[k],qz[k]]
+            # print(f"distance between waypoints {D}")
+            # print(f"Trying path {param2.type} and segment {param2.seg_final}")
+            if (obstacle_list):
+                cost,collision = costPath(param2, obstacle_list)
+            else:
+                cost,collision = costPath(param2)
+            # cost = tz[k] + pz[k] + qz[k]
+            if(cost<=lowest_cost or lowest_cost==-1 and not collision): #last checks for collision
                 best_word = k+1
                 lowest_cost = cost
                 param.seg_final = [tz[k],pz[k],qz[k]]
 
-    param.type = TurnType(best_word)
+    param.type = TurnType(best_word) if best_word != -1 else 0
+    # print("Best path: ", param.type)
     return param
+
+def costPath(param,obstacle_list = None):
+    """
+    Calculate the cost as the length of a Dubins path
+    then we check for obstacles
+    if there are obstacles, we add a (big)cost to the path
+    obstacle list is a list of tuples (x,y,z,radius)
+    """
+    cost = param.seg_final[0] + param.seg_final[1] + param.seg_final[2]
+    collision = False
+    if(obstacle_list):
+
+        def is_collision_free(point):
+            """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
+            px, py, _ = point  # Ignore z
+            for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
+                if np.linalg.norm(np.array([px, py]) - np.array([ox, oy])) < r:
+                    return False
+            return True
+        # print(f"cost , {cost}")
+        collision_step_size = 0.02  #how to pass this parameter hmmmmmmmmm
+        discrete_path = dubins_traj(param, collision_step_size)
+        # print(f"param startpoint {param.p_init} path : {discrete_path[-1]}")
+        for point in discrete_path:
+            if not is_collision_free(point):
+                collision = True
+                break
+        # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
+    return cost,collision
 
 # Compute all Dubins options
 def dubinsLSL(alpha, beta, d):
