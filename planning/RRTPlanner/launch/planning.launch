@@ -1,0 +1,19 @@
+<launch>
+    <arg name="robot_name" default="sam_auv_v1"/>
+    <!-- <arg name="vision_params_yaml" default="$(find-pkg-share auv_detector)/config/simulation_config.yaml"/> -->
+    
+    <group>
+        <push-ros-namespace namespace="$(var robot_name)"/>
+
+        <node
+            name="planning_node"
+            pkg="RRTPlanner"
+            exec="planner"
+            output="screen">
+            <!-- Declare parameters with default values -->
+            <param name="robot_name" value="$(var robot_name)" />
+
+        </node>
+
+    </group>
+</launch>

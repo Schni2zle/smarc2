@@ -1,10 +1,24 @@
 <launch>
 
-    <arg name="robot_name" default="sam0"/>
+    <arg name="robot_name" default="sam_auv_v1"/>
    
     <group>
     <push-ros-namespace namespace="$(var robot_name)"/>
-       <node name="diving" pkg="sam_diving_controller" exec="manual_diving" output="screen"/>
+       <node 
+            name="diving" 
+            pkg="sam_diving_controller" 
+            exec="manual_diving" 
+            output="screen">
+            <!-- <param name="robot_name" value="$(var robot_name)" /> -->
+       </node>
+
+       <node 
+            name="setpoint_publishing_node" 
+            pkg="sam_diving_controller" 
+            exec="setpoint" 
+            output="screen">
+            <param name="robot_name" value="$(var robot_name)" />
+       </node>
     </group>
 
 </launch>

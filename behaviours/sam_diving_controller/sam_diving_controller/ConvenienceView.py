@@ -143,10 +143,22 @@ class ConvenienceView(IDiveView):
             dive_pitch = self._controller.get_dive_pitch()
 
             s += f"Waypoint Following\n"
-            s += f"   distance: {distance:.3f}, "\
-                 f"heading: {heading:.3f}, "\
-                 f"dive pitch: {dive_pitch:.3f}\n"
-
+            # s += f"   distance: {distance:.3f}, "\
+            #      f"heading: {heading:.3f}, "\
+            #      f"dive pitch: {dive_pitch:.3f}\n"
+            s += (
+                    f"   distance: {distance:.3f} "
+                    if distance is not None
+                    else "   distance: N/A, "
+                ) + (
+                    f"heading: {heading:.3f}, "
+                    if heading is not None
+                    else "heading: N/A, "
+                ) + (
+                    f"dive pitch: {dive_pitch:.3f}\n"
+                    if dive_pitch is not None
+                    else "dive pitch: N/A\n"
+                )
         if self._error_msg is None:
             s += "No control yet\n"
         else:

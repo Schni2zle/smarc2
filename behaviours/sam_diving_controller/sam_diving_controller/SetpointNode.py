@@ -25,11 +25,12 @@ class SetpointPublisher():
     def __init__(self, node: Node) -> None:
 
         self._node = node
-
+        node.declare_parameter( "robot_name", "sam_auv_v1")
+        self.robot_name = node.get_parameter("robot_name").value
         self._setpoint_pub = node.create_publisher(Odometry, '/ctrl/waypoint', 10)
         self._setpoint_msg = Odometry()
         self._setpoint_msg.header.stamp = self.rcl_time_to_stamp(self._node.get_clock().now())
-        self._setpoint_msg.header.frame_id = 'sam0/odom_gt'
+        self._setpoint_msg.header.frame_id = f"{self.robot_name}/odom_gt"
         self._setpoint_msg.pose.pose.position.x = 40.0
         self._setpoint_msg.pose.pose.position.y = 10.0
         self._setpoint_msg.pose.pose.position.z = -5.0
@@ -85,7 +86,6 @@ def main():
         pass
 
     node.get_logger().info("Shutting down")
-
 
 # Could also run this without ros2
 if __name__ == "__main__":
