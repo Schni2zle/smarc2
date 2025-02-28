@@ -16,13 +16,14 @@ import time
 import matplotlib.pyplot as plt
 import tf_transformations
 from dubins_planner.dubins import Waypoint, calc_dubins_path, sample_complete_plan
+from RRTPlanner.sam_auv_node import StateInformation
 
 class RRTPlanner():
     def __init__(self,
                  node: Node,
                  goal_tolerance: float = 3.0) -> None:
         self._node = node
-        self.obstacle_scale = 5.0  # Scale obstacles by this factor
+        self.obstacle_scale = 10.0  # Scale obstacles by this factor
         # TF listener to get obstacle positions
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self._node)
@@ -39,6 +40,8 @@ class RRTPlanner():
         self.timer = self._node.create_timer(0.1, self.manager)  # Timer to get obstacles periodically
         self.obstacles_populated = False  # Flag to check if obstacles are populated
 
+        self.sam_states = StateInformation(self._node)
+
         # RRT variables 
         self.forward_tree = None
         self.backward_tree = None
@@ -46,8 +49,9 @@ class RRTPlanner():
         # RRT parameters
         self.stepsize = 6.0
         self.turning_radius = 3.0
-        self.step_dubins = 3.0
+        self.step_dubins = 0.02
         self.original_wp_indices = []
+
     def get_orientation(self):
         """ Get initial orientation of the robot """
         trans = TransformStamped()
@@ -93,7 +97,9 @@ class RRTPlanner():
         self.visualize = False
         self.forward_tree = Tree(forward_root_node, visualize=self.visualize) 
         rewire_count = 0
+        self.sam_states.check_state()
         for _ in range(100000):  # Max iterations 
+            self.sam_states.check_state()
             rand_point = self.goal_biased_sampling()
             # self._node.get_logger().info(f"Random point: {rand_point}")
             nearest_node = Tree_Node()
@@ -124,11 +130,11 @@ class RRTPlanner():
         #now we send this path to dubins planner to get additional waypoints.
         dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path 
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
-        dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins)
+        dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles)
 
         dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
-        dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+        dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles)
         # dubins_out = dubins_out_forward + dubins_out_backward[::-1]
         self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path_back)
 

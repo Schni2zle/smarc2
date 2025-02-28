@@ -88,9 +88,12 @@ def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
             # print(f"Trying path {param2.type} and segment {param2.seg_final}")
             if (obstacle_list):
                 cost,collision = costPath(param2, obstacle_list)
+                # print(f"collision {collision}")
             else:
                 cost,collision = costPath(param2)
+                
             # cost = tz[k] + pz[k] + qz[k]
+            # print(f"turn type  {TurnType(k+1)} and collision : {collision} " )
             if(cost<=lowest_cost or lowest_cost==-1 and not collision): #last checks for collision
                 best_word = k+1
                 lowest_cost = cost
@@ -115,7 +118,9 @@ def costPath(param,obstacle_list = None):
             """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
             px, py, _ = point  # Ignore z
             for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
-                if np.linalg.norm(np.array([px, py]) - np.array([ox, oy])) < r:
+                dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
+                # print(f"Checking point {px, py} with obstacle {ox, oy, r} and distance {dist}")
+                if dist < r:
                     return False
             return True
         # print(f"cost , {cost}")
@@ -334,14 +339,17 @@ def circle_line_segment_intersection(circle_center, circle_radius, pt1, pt2, ful
 
 
 
-def sample_between_wps(wp_from, wp_to, turn_radius, step):
-    path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius), step)
+def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None):
+    if obstacle_list is not None:
+        path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius, obstacle_list), step)
+    else:
+        path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius), step)
     # ignore the first and last points in the path, since
     # the first is wp_from and last is step-close to wp_to
     return path[1:-1]
 
 
-def sample_complete_plan(waypoints, turn_radius, step):
+def sample_complete_plan(waypoints, turn_radius, step, osbtacle_list = None):
     """
     Sample between each WP in the list of Waypoints and return
     one list of waypoints with all the in-betweens and another list
