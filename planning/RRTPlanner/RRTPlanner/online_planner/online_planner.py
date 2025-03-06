@@ -35,13 +35,11 @@ class RRTPlanner():
 
         self.obstacles = []  # Store detected obstacles
         self.start = (0, 0, 0, random.uniform(-np.pi, np.pi))  # Start position
-        # self.goal = (65, 5, 0, 0)  # Goal position
-        self.goal = (20, -40, 0, 0)  # Goal position
-
+        self.goal = (65, 5, 0, 0)  # Goal position
         self.goal_tolerance = goal_tolerance  # Goal tolerance radius
-        self.timer = self._node.create_timer(0.1, self.manager)  # Timer to get obstacles periodically
+        self.timer = self._node.create_timer(0.1, self.online_manager)  # Timer to get obstacles periodically
         self.obstacles_populated = False  # Flag to check if obstacles are populated
-
+        self.goal_sent_flag = False
         self.sam_states = StateInformation(self._node)
 
         # RRT variables 
@@ -53,22 +51,20 @@ class RRTPlanner():
         self.turning_radius = 3.0
         self.step_dubins = 0.5
         self.original_wp_indices = []
-        self.goal_sent = False  
 
-
-
-
-    def get_orientation(self):
+    def get_pose(self):
         """ Get initial orientation of the robot """
         trans = TransformStamped()
         try:
             trans = self.tf_buffer.lookup_transform('sam_auv_v1/base_link_gt', f'sam_auv_v1/odom_gt', rclpy.time.Time(seconds=0))
+            posx = trans.transform.translation.x
+            posy = trans.transform.translation.y
             quat = trans.transform.rotation
             roll, pitch, yaw = tf_transformations.euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-            return yaw
+            return posx, posy, yaw
         except Exception as e:
             self._node.get_logger().info(f"Couldn't lookup transform {e}")
-            return None
+            return None, None, None
 
     def get_obstacles_from_tf(self):
         """ Extract obstacles from the TF tree """
@@ -83,7 +79,7 @@ class RRTPlanner():
 
                     x, y, z = trans.transform.translation.x, trans.transform.translation.y, trans.transform.translation.z
                     radius = self.obstacle_scale*np.sqrt((trans_radius.transform.translation.x)**2 + (trans_radius.transform.translation.y)**2)
-
+ 
                     self.obstacles.append((x, y, z, radius))
                     self._node.get_logger().info(f"Detected position of obstacle {(x,y)}")
                     self._node.get_logger().info(f"Detected radius of obstacle {radius}")
@@ -98,8 +94,9 @@ class RRTPlanner():
     def run_rrt(self, start, goal):
         """ Run RRT algorithm to find a collision-free path """
         # path = [self.start]
-
-        forward_root_node = Tree_Node(state = self.start)
+        #final_wp is a flag to check if the immediate next wp is the goial, to be used in the online algorithm
+        final_wp = False
+        forward_root_node = Tree_Node(state = start)
         self.visualize = False
         self.forward_tree = Tree(forward_root_node, visualize=self.visualize) 
         rewire_count = 0
@@ -132,7 +129,9 @@ class RRTPlanner():
                     # self._node.get_logger().info(f"Was tree rewired? {rewired}")
         path, cost = self.forward_tree.find_path(final_node)
         self._node.get_logger().info(f"Generated path with {len(path)} waypoints and rewired {rewire_count} times")
-        
+        if len(path) == 2:
+            #path length being 2 means that the goal is the immediate next waypoint
+            final_wp = True
         #now we send this path to dubins planner to get additional waypoints.
         dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path 
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
@@ -141,13 +140,19 @@ class RRTPlanner():
         dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles)
+
+        self._node.get_logger().info(f"the original indices : {original_indices}")
+
+
         # dubins_out = dubins_out_forward + dubins_out_backward[::-1]
         self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path_back)
-        
+
         # convert back to pose2D for transfer
         self.original_wp_indices = [int(i) for i in original_indices]
-        goal_msg = self.send_waypoints(dubins_out_forward, path)
-        return goal_msg 
+        # give waypoints till the first original index to fawllow
+        dubins_first_waypoint = dubins_out_forward[0:self.original_wp_indices[1]]
+        goal_msg = self.send_waypoints(dubins_first_waypoint, path)
+        return goal_msg, final_wp
     
     def dubins_steer(self, start, end):
         """ Move from start towards end by step_size """
@@ -195,7 +200,6 @@ class RRTPlanner():
             if valid_node and distance < rewiring_distance:
                 path_exist = self.is_path_collision_free(new_node.get_state(), node.get_state())  
                 
-            
                 if  path_exist: #and (distance < self.stepsize)
                     #compute cost of new path and old path
                     # self._node.get_logger().info(f"rewiring node check")
@@ -274,7 +278,7 @@ class RRTPlanner():
             x, y = waypoint_array_backward[:, 0], waypoint_array_backward[:, 1]
             plt.plot(x, y, marker='o', linestyle='-', color='r', label  = "Reverse Path")
             plt.scatter(x, y, color='r')
-
+            
         # Plot obstacles with their radii
         for ox, oy, _, r in self.obstacles:  # Ignoring Z
             obstacle_circle = plt.Circle((ox, oy), r, color='gray', alpha=0.5, fill=True)
@@ -301,33 +305,50 @@ class RRTPlanner():
         plt.axis("equal")  # Ensures equal scaling for X and Y
         plt.show()
 
-    def manager(self):
+    def online_manager(self):
         """ Periodically check for obstacles and run RRT """
-        if not self.get_orientation():
-            self._node.get_logger().info("Waiting for initial orientation")
+        #get initial orientation
+        if not self.get_pose()[0]:
+            self._node.get_logger().info("Waiting for initial pose")
             return
         else:
             if self.start[3] is None:
-                self.start = (0, 0, 0, self.get_orientation()) 
-                self._node.get_logger().info(f"Initial orientation: {self.start[3]}")
-        #get obstacles from tf 
-        if not self.obstacles_populated:
+                self.start = (self.get_pose()[0], self.get_pose()[1], 0, self.get_pose()[2]) 
+                self._node.get_logger().info(f"Initial pose: {self.start}")
+
+        if not self.obstacles_populated: #will temporarily stay here
             self.get_obstacles_from_tf()
-        
-        #once you have an obstacle list, run rrt
-        if self.obstacles_populated and self.goal_msg == [] and not self.goal_sent:
-            self._node.get_logger().info("Obstacles populated. Running RRT")
-            self.goal_msg = self.run_rrt(self.start, self.goal)
-            #send goal to action client
-            self._node.get_logger().info("Sending Goal")
-            
-            self._ac.waypoint_queue.extend(self.goal_msg[1:])
-            self._ac.send_goal()
-            self.goal_sent = True
-        # self._node.get_logger().info("sent goalpoint.")
-            # #cancel timer
-            # self._node.get_logger().info("Ending Timer")
-            # self.timer.cancel()
+        #this takes care of ending the loop when we reach the final waypoint
+        final_waypoint_bool = False
+        while not final_waypoint_bool :
+            #now we run rrt
+            if not self.goal_sent_flag : 
+                self._node.get_logger().info("Running RRT")
+                self.goal_msg, final_waypoint_bool = self.run_rrt(self.start, self.goal)
+                #send goal = first waypoint to action client
+                self._node.get_logger().info("Sending Goal")
+                #here we need to wait for feedback msg from le client
+                #once we have waited, new actual state from tf, and update the state so that rrt is run using it next time. 
+                self._ac.waypoint_queue.extend(self.goal_msg[1:])
+                self._ac.send_goal()
+                self.goal_sent_flag = True
+
+            #where, when and how in the carrying out of the following do I need to cancel if collision is detected????????????????????
+            #ok you can run it here I checked yippeeeeee, it works in parallel
+            #cancel goal if collision detected HMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+            # self._node.get_logger().info("Checking for collision")
+            #chck obstacle and cancel logic and dont forget to tick the bool for sent_goal off.
+
+            #now check if  waypoint_queue is in its last step, if yes, we calculate the next steps.
+            if not self._ac.assign_next_waypoint :
+                new_start = self.get_pose()
+                self.start = new_start
+                self.goal_sent_flag = False
+                    
+
+        #cancel timer
+        self._node.get_logger().info("Ending Timer")
+        self.timer.cancel()
 
 def main():
     rclpy.init(args=sys.argv)
@@ -336,7 +357,7 @@ def main():
 
     executor = MultiThreadedExecutor()
     executor.add_node(plan_node)  # Spin planner
-    
+
     try:
         executor.spin()  # Keep both nodes alive
     except KeyboardInterrupt:
@@ -345,6 +366,6 @@ def main():
         planner._node.destroy_node()
         # ac_node.destroy_node()
         rclpy.shutdown()
-    
+
 if __name__ == "__main__":
     main()

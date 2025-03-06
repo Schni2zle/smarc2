@@ -13,7 +13,7 @@ class StateInformation() :
         self.battery = 0
         self.depth = 0
         self.altitude = 0
-        self.position = ""
+        self.global_position = ""
         self.healthy = False
 
         # Timer to check state periodically
@@ -26,9 +26,9 @@ class StateInformation() :
 
         self.depth = vehicle_state[SensorNames.DEPTH]._values
         self.altitude = vehicle_state[SensorNames.ALTITUDE]._values
-        self.position = vehicle_state[SensorNames.POSITION]._values
+        self.global_position = vehicle_state[SensorNames.GLOBAL_POSITION]._values
         self.healthy = vehicle_state[SensorNames.VEHICLE_HEALTHY]._values
         self.battery = vehicle_state[SensorNames.BATTERY]._values
 
-        self._node.get_logger().info(f"Depth: {self.depth}m, Altitude: {self.altitude}m, Position: {self.position}, Healthy: {self.healthy}, Battery: {self.battery}")
+        # self._node.get_logger().info(f"Depth: {self.depth}m, Altitude: {self.altitude}m, Position: {self.global_position}, Healthy: {self.healthy}, Battery: {self.battery}")
     

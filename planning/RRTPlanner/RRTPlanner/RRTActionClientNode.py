@@ -102,7 +102,6 @@ class DiveToWaypointActionClient():
         # this field contains the object we defined in smarc_mission_msgs/action/GotoWaypoint.action
         self._loginfo(f"Got feedback from server: {feedback.feedback.feedback_message}")
 
-
     def send_goal(self):
 
         self._loginfo("Waiting for server to come alive")
@@ -117,6 +116,7 @@ class DiveToWaypointActionClient():
         if self.current_waypoint is None:
             self.current_waypoint = PoseStamped()
             self.current_waypoint = self.waypoint_queue.pop(0)
+            #if pop return None should I make a special bool to say all the waypoints been covered?
         goal_msg.waypoint.pose = self.current_waypoint
         goal_msg.waypoint.pose.header.frame_id = 'sam_auv_v1/odom_gt'
         
