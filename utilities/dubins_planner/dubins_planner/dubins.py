@@ -7,6 +7,7 @@ Compute Dubins path between waypoints
 import math
 import numpy as np
 from enum import Enum
+import matplotlib.pyplot as plt
 
 
 class TurnType(Enum):
@@ -69,7 +70,7 @@ def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
     alpha = (psi1 - theta) % (2*math.pi)
     beta  = (psi2 - theta) % (2*math.pi)
     best_word = -1
-    lowest_cost = -1
+    lowest_cost = np.inf
 
     # Compute all Dubins paths between points
     tz[0], pz[0], qz[0] = dubinsLSL(alpha,beta,d)
@@ -94,11 +95,11 @@ def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
                 
             # cost = tz[k] + pz[k] + qz[k]
             # print(f"turn type  {TurnType(k+1)} and collision : {collision} " )
-            if(cost<=lowest_cost or lowest_cost==-1 and not collision): #last checks for collision
+            if(cost<=lowest_cost and not collision): #last checks for collision
                 best_word = k+1
                 lowest_cost = cost
                 param.seg_final = [tz[k],pz[k],qz[k]]
-
+                # print("Entering here")
     param.type = TurnType(best_word) if best_word != -1 else 0
     # print("Best path: ", param.type)
     return param
@@ -110,29 +111,32 @@ def costPath(param,obstacle_list = None):
     if there are obstacles, we add a (big)cost to the path
     obstacle list is a list of tuples (x,y,z,radius)
     """
-    cost = param.seg_final[0] + param.seg_final[1] + param.seg_final[2]
+    cost = sum(param.seg_final)
     collision = False
     if(obstacle_list):
 
-        def is_collision_free(point):
-            """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
-            px, py, _ = point  # Ignore z
-            for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
-                dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
-                # print(f"Checking point {px, py} with obstacle {ox, oy, r} and distance {dist}")
-                if dist < r:
-                    return False
-            return True
+        
         # print(f"cost , {cost}")
-        collision_step_size = 0.02  #how to pass this parameter hmmmmmmmmm
+        collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
         discrete_path = dubins_traj(param, collision_step_size)
         # print(f"param startpoint {param.p_init} path : {discrete_path[-1]}")
         for point in discrete_path:
-            if not is_collision_free(point):
+            if not is_collision_free(point, obstacle_list):
                 collision = True
                 break
+
         # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
     return cost,collision
+
+def is_collision_free(point, obstacle_list):
+        """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
+        px, py, _ = point  # Ignore z
+        for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
+            dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
+            # print(f"Checking point {px, py} with obstacle {ox, oy, r} and distance {dist}")
+            if dist < r:
+                return False
+        return True
 
 # Compute all Dubins options
 def dubinsLSL(alpha, beta, d):
@@ -341,6 +345,7 @@ def circle_line_segment_intersection(circle_center, circle_radius, pt1, pt2, ful
 
 def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None):
     if obstacle_list is not None:
+        print("Obstacle list is not None")
         path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius, obstacle_list), step)
     else:
         path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius), step)
@@ -349,7 +354,7 @@ def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None):
     return path[1:-1]
 
 
-def sample_complete_plan(waypoints, turn_radius, step, osbtacle_list = None):
+def sample_complete_plan(waypoints, turn_radius, step, obstacle_list = None):
     """
     Sample between each WP in the list of Waypoints and return
     one list of waypoints with all the in-betweens and another list
@@ -368,7 +373,10 @@ def sample_complete_plan(waypoints, turn_radius, step, osbtacle_list = None):
     for i in range(len(waypoints)-1):
         next_wp = waypoints[i+1]
         curr_wp = waypoints[i]
-        sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step)
+        if obstacle_list is not None:
+            sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step, obstacle_list)
+        else:
+            sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step)
         original_wp_indices.append(len(complete_path))
         complete_path.append((curr_wp.x, curr_wp.y, curr_wp.psi))
         complete_path.extend(sampled)
@@ -379,7 +387,50 @@ def sample_complete_plan(waypoints, turn_radius, step, osbtacle_list = None):
 
     return complete_path, original_wp_indices
 
+def main():
+    # Test the dubins planner
+    # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
+    # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
+    # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
+    # waypoints, angles = waypoints_with_yaw(waypoints)
+    wp1 = Waypoint(-10,5,0)
+    wp2 = Waypoint(20,5,180)
+    waypoints = [wp1, wp2]
+    turn_radius = 1
+    step = 0.01
+    obstacle_list = [(5,5,0,5)]
+    # param = calc_dubins_path(wp1, wp2, turn_radius, obstacle_list)
+    param = calc_dubins_path(wp1, wp2, turn_radius)
 
+    print(param.type)
+    print(param.seg_final)
+    # complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step, obstacle_list)
+    complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step)
+
+    # print(complete_path)
+    # print(original_wp_indices)
+    plt.figure(figsize=(8, 8))
+    complete_path_array = np.array(complete_path)
+    x, y = complete_path_array[:, 0], complete_path_array[:, 1]
+    plt.plot(x, y, marker='o', linestyle='-', color='b', label="Path")
+    plt.scatter(x, y, color='r', label="Waypoints")  # Highlight waypoints
+
+    for ox, oy, _, r in obstacle_list:  # Ignoring Z
+            obstacle_circle = plt.Circle((ox, oy), r, color='gray', alpha=0.5, fill=True)
+            plt.gca().add_patch(obstacle_circle)
+            plt.scatter(ox, oy, color='k', marker='x', label="Obstacle" if 'Obstacle' not in plt.gca().get_legend_handles_labels()[1] else "")
+
+    # Plot settings
+    plt.xlabel("X Position")
+    plt.ylabel("Y Position")
+    plt.title("Waypoint Path with Obstacles")
+    plt.legend()
+    plt.grid()
+    plt.axis("equal")  # Ensures equal scaling for X and Y
+    plt.show()
+    
+if __name__ == "__main__":
+    main()
 
 
 

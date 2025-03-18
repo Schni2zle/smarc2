@@ -34,10 +34,11 @@ class RRTPlanner():
         self.goal_msg = []
 
         self.obstacles = []  # Store detected obstacles
-        self.start = (0, 0, 0, random.uniform(-np.pi, np.pi))  # Start position
-        # self.goal = (65, 5, 0, 0)  # Goal position
-        self.goal = (20, -40, 0, 0)  # Goal position
+        self.start = (0, 0, 0, 0)  # Start position
+        self.goal = (65, 5, 0, 0)  # Goal position
+        # self.goal = (20, -40, 0, 0)  # Goal position
 
+        self.rewiring_distance = 2.0  # Rewiring distance
         self.goal_tolerance = goal_tolerance  # Goal tolerance radius
         self.timer = self._node.create_timer(0.1, self.manager)  # Timer to get obstacles periodically
         self.obstacles_populated = False  # Flag to check if obstacles are populated
@@ -65,7 +66,7 @@ class RRTPlanner():
             trans = self.tf_buffer.lookup_transform('sam_auv_v1/base_link_gt', f'sam_auv_v1/odom_gt', rclpy.time.Time(seconds=0))
             quat = trans.transform.rotation
             roll, pitch, yaw = tf_transformations.euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-            return yaw
+            return yaw*180/np.pi
         except Exception as e:
             self._node.get_logger().info(f"Couldn't lookup transform {e}")
             return None
@@ -87,7 +88,7 @@ class RRTPlanner():
                     self.obstacles.append((x, y, z, radius))
                     self._node.get_logger().info(f"Detected position of obstacle {(x,y)}")
                     self._node.get_logger().info(f"Detected radius of obstacle {radius}")
-
+                    
                 except Exception as e:
                     self._node.get_logger().info(f"Couldn't lookup transform {e}")
                     continue  # Ignore missing obstacles
@@ -124,9 +125,11 @@ class RRTPlanner():
                     # self._node.get_logger().info(f"Distance to goal: {distance_to_goal}")
                     if  distance_to_goal < self.goal_tolerance:
                         # self._node.get_logger().info("Goal reached")
-                        final_node = Tree_Node(parent = nearest_node,state = self.goal)
-                        self.forward_tree.add_node(final_node)
-                        break
+                        self.goal, path_to_goal = self.dubins_steer(new_point, self.goal)
+                        if path_to_goal:
+                            final_node = Tree_Node(parent = nearest_node,state = self.goal)
+                            self.forward_tree.add_node(final_node)
+                            break
                     rewired = self.rewiring(new_node)
                     rewire_count += 1 if rewired else 0
                     # self._node.get_logger().info(f"Was tree rewired? {rewired}")
@@ -154,14 +157,14 @@ class RRTPlanner():
         direction = np.array(end) - np.array(start)
         direction = direction[:2]  # Ignore Z and yaw
         norm = np.linalg.norm(direction)
-        direction = direction
         if norm == 0:
-            return start
+            return start, False
         # self._node.get_logger().info(f"start: {start} end : {end}")
-        new_point = end
+        # new_point = end
+        new_point = np.concatenate((min(norm,self.stepsize)* direction / norm, end[2:]))  + np.array(start)
         # self._node.get_logger().info(f"projection on the steerable space: {new_point}")
-        center1 = start[0:2] + np.array([np.cos(start[3] + np.pi/2), np.sin(start[3] + np.pi/2)]) * self.turning_radius
-        center2 = start[0:2] + np.array([np.cos(start[3] - np.pi/2), np.sin(start[3] - np.pi/2)]) * self.turning_radius
+        center1 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 + np.pi/2), np.sin(start[3]*np.pi/180 + np.pi/2)]) * self.turning_radius
+        center2 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 - np.pi/2), np.sin(start[3]*np.pi/180 - np.pi/2)]) * self.turning_radius
         # is_front = np.dot(direction, np.array([np.cos(start[3]), np.sin(start[3])])) > 0 
         left_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center2)) < self.turning_radius
         right_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center1)) < self.turning_radius
@@ -170,32 +173,52 @@ class RRTPlanner():
             # self._node.get_logger().info(f"not in steerable region: {new_point}")
             return start, False
         else: 
-            #now we check for collisions
-            if self.is_path_collision_free(start,end):
-                return new_point, True
-            else:
-                return new_point, False
+            #now we check for collisions and the shortest path for a range of headings
+            path_exist,best_heading = self.is_path_collision_free(start,new_point)
+            new_point = (new_point[0], new_point[1], new_point[2], best_heading)
+            # self._node.get_logger().info(f"returning new point: {new_point}")
+            return new_point, path_exist
 
     def is_path_collision_free(self, start, end):
+        base_heading = end[3]
+        step_heading = 6
+        headings =  base_heading + np.linspace(0, 360, step_heading, endpoint = False) - 180
 
-        wp_1 = Waypoint(start[0], start[1], start[3])
-        wp_2 = Waypoint(end[0], end[1], end[3])
-        
-        param = calc_dubins_path(wp_1, wp_2, self.turning_radius, self.obstacles)
-        path_exist = (param.seg_final != [0, 0, 0])
-        return path_exist
+        min_cost = np.inf
+        best_heading = base_heading
+        path_exist = False
+
+        for heading in headings:
+            wp_1 = Waypoint(start[0], start[1], start[3])
+            wp_2 = Waypoint(end[0], end[1], heading)
+            path_exist_temp = False
+            param = calc_dubins_path(wp_1, wp_2, self.turning_radius, self.obstacles)
+            path_exist_temp = (param.seg_final != [0, 0, 0]) # if no path exists this is [0 0 0]
+            
+            if path_exist_temp:
+                path_exist = True
+                path_cost = sum(param.seg_final)
+
+                if path_cost < min_cost:
+                    min_cost = path_cost 
+                    best_heading = heading
+            # else: 
+                # print(f"Path does not exist for heading: {heading}")
+        # if path_exist:
+            # self._node.get_logger().info(f"Best heading: {best_heading - base_heading}")
+
+        return path_exist, best_heading
     
     def rewiring(self, new_node):
         """ Rewire the tree to reduce cost """
         rewired = False
-        rewiring_distance = 15.0
+        rewiring_distance = self.rewiring_distance
         for node in self.forward_tree.get_nodes() :
             valid_node = node != new_node and node != self.forward_tree.get_root()
             distance = np.linalg.norm(np.array(new_node.get_state())[0:2] - np.array(node.get_state())[0:2])
             if valid_node and distance < rewiring_distance:
                 path_exist = self.is_path_collision_free(new_node.get_state(), node.get_state())  
                 
-            
                 if  path_exist: #and (distance < self.stepsize)
                     #compute cost of new path and old path
                     # self._node.get_logger().info(f"rewiring node check")
@@ -210,11 +233,12 @@ class RRTPlanner():
                         node.assign_parent(old_path[-2])
         return rewired
 
+
     def goal_biased_sampling(self):
         """ Biased sampling towards the goal """
-        if random.uniform(0, 1) < 0.01:
+        if random.uniform(0, 1) < 0.1:
             return self.goal
-        return (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-np.pi, np.pi)) #random.uniform(-np.pi/6, np.pi/6))
+        return (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180)) #random.uniform(-np.pi/6, np.pi/6))
     
     def find_reverse_path(self, state, nearest_node):
         """ Returns the path from the root to the end node."""
@@ -269,11 +293,11 @@ class RRTPlanner():
             #     plt.scatter(waypoint_array[i][0], waypoint_array[i][1], color='g', marker='x', label="Original Waypoint" if 'Original Waypoint' not in plt.gca().get_legend_handles_labels()[1] else "")
             x, y = waypoint_array_forward[:, 0], waypoint_array_forward[:, 1]
             plt.plot(x, y, marker='o', linestyle='-', color='b', label="Path")
-            plt.scatter(x, y, color='r', label="Waypoints")  # Highlight waypoints
-        if len(waypoint_array_backward) > 0:
-            x, y = waypoint_array_backward[:, 0], waypoint_array_backward[:, 1]
-            plt.plot(x, y, marker='o', linestyle='-', color='r', label  = "Reverse Path")
-            plt.scatter(x, y, color='r')
+            # plt.scatter(x, y, color='r', label="Waypoints")  # Highlight waypoints
+        # if len(waypoint_array_backward) > 0:
+        #     x, y = waypoint_array_backward[:, 0], waypoint_array_backward[:, 1]
+        #     plt.plot(x, y, marker='o', linestyle='-', color='r', label  = "Reverse Path")
+        #     plt.scatter(x, y, color='r')
 
         # Plot obstacles with their radii
         for ox, oy, _, r in self.obstacles:  # Ignoring Z
