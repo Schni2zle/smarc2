@@ -113,17 +113,17 @@ def costPath(param,obstacle_list = None):
     """
     cost = sum(param.seg_final)
     collision = False
-    if(obstacle_list):
+    # if(obstacle_list):
 
         
         # print(f"cost , {cost}")
-        collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
-        discrete_path = dubins_traj(param, collision_step_size)
+        # collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
+        # discrete_path = dubins_traj(param, collision_step_size)
         # print(f"param startpoint {param.p_init} path : {discrete_path[-1]}")
-        for point in discrete_path:
-            if not is_collision_free(point, obstacle_list):
-                collision = True
-                break
+        # for point in discrete_path:
+        #     if not is_collision_free(point, obstacle_list):
+        #         collision = True
+        #         break
 
         # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
     return cost,collision
@@ -345,7 +345,7 @@ def circle_line_segment_intersection(circle_center, circle_radius, pt1, pt2, ful
 
 def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None):
     if obstacle_list is not None:
-        print("Obstacle list is not None")
+        # print("Obstacle list is not None")
         path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius, obstacle_list), step)
     else:
         path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius), step)

@@ -73,6 +73,7 @@ class DiveToWaypointActionClient():
         self._goal_handle = goal_handle
 
         self._get_result_future = goal_handle.get_result_async()
+        self._loginfo("Waiting for result...")
         self._get_result_future.add_done_callback(self._get_result_cb)
 
 
@@ -83,6 +84,8 @@ class DiveToWaypointActionClient():
             self._loginfo(f"Success: {result.reached_waypoint}. Assigning next waypoint")
             if self.assign_next_waypoint():
                 self.send_goal()
+            else:
+                self._loginfo("No more waypoints left. Stopping.")
         else:
             self._loginfo(f"NOT Success: Status:{status}, result:{result.reached_waypoint}")
 
@@ -90,6 +93,7 @@ class DiveToWaypointActionClient():
 
     def assign_next_waypoint(self):
         if self.waypoint_queue :
+            self._loginfo(f"popping queue")
             self.current_waypoint = self.waypoint_queue.pop(0)
             return True
         else:
@@ -125,7 +129,7 @@ class DiveToWaypointActionClient():
         goal_msg.waypoint.travel_rpm = 500.0
         goal_msg.waypoint.goal_tolerance = 1.0
         
-        self._loginfo(f"Sending goal: {goal_msg}")
+        self._loginfo(f"Sending goal: {[self.current_waypoint.pose.position.x, self.current_waypoint.pose.position.y, self.current_waypoint.pose.position.z]}")
 
         self._send_goal_future = self._ac.send_goal_async(
             goal=goal_msg,

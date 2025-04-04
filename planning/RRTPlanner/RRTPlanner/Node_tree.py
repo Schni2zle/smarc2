@@ -10,8 +10,8 @@ class Tree_Node:
     def assign_state(self, state):
         self._state = state  #state is a tuple of coordinates, (x,y,z), and the relevant sensor data. It will decide the next action to take
 
-    def assign_root(self, root):
-        self._root = root
+    # def assign_root(self, root):
+    #     self._root = root
 
     def assign_children(self, children):
         self._children = children
@@ -33,6 +33,12 @@ class Tree_Node:
     
     def get_state(self):
         return self._state
+    
+    def copy(self):
+        return Tree_Node(self._parent, self._cost, self._state)
+    
+    def reset_children(self):
+        self._children = []
 
 class Tree:
     def __init__(self, root, visualize = False):
@@ -51,6 +57,8 @@ class Tree:
     def add_node(self, node):
         self._nodes.append(node)
         if node.get_parent():
+            parent = node.get_parent()
+            parent.add_child(node)
             self._edges.append((node.get_parent(), node))  # Store edge
         if self._visualize:
             self.visualize_tree()  # Update visualization dynamically
@@ -125,3 +133,35 @@ class Tree:
             return path, cost_cumulative
         else:
             return [], np.inf
+        
+    def set_root(self,root) :
+        """disconnect the path upto the root and set the new root"""
+        self._root = root
+        root.assign_parent(None)
+        return root
+
+
+def copy_tree(node, parent=None, tree = None, final_node = None):    
+    """copy the forward tree recursively"""
+    
+    if tree is None:
+        copy_node = node.copy()
+        copy_node.assign_parent(None)
+        tree = Tree(copy_node)
+        for child in node.get_children():
+                copy_child = child.copy()
+                copy_child.assign_parent(copy_node)
+                # copy_child.reset_children()
+                tree.add_node(copy_child)
+                # print(f"added child {child.get_state()}")
+                tree = copy_tree(child, copy_child, tree, final_node)
+    else:
+        if node.get_children() != [] and node != final_node:
+            for child in node.get_children():
+                copy_child = child.copy()
+                copy_child.assign_parent(parent)
+                # copy_child.reset_children()
+                tree.add_node(copy_child)
+                # print(f"added child {child.get_state()}")
+                tree = copy_tree(child, copy_child, tree, final_node)
+    return tree

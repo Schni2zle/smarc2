@@ -21,7 +21,7 @@ from RRTPlanner.sam_auv_node import StateInformation
 class RRTPlanner():
     def __init__(self,
                  node: Node,
-                 goal_tolerance: float = 3.0) -> None:
+                 goal_tolerance: float = 5.0) -> None:
         self._node = node
         self.obstacle_scale = 10.0  # Scale obstacles by this factor
         # TF listener to get obstacle positions
@@ -37,8 +37,8 @@ class RRTPlanner():
         self.start = (0, 0, 0, 0)  # Start position
         self.goal = (65, 5, 0, 0)  # Goal position
         # self.goal = (20, -40, 0, 0)  # Goal position
-
-        self.rewiring_distance = 2.0  # Rewiring distance
+        self.path_back_check = True
+        self.rewiring_distance = 6.0  # Rewiring distance
         self.goal_tolerance = goal_tolerance  # Goal tolerance radius
         self.timer = self._node.create_timer(0.1, self.manager)  # Timer to get obstacles periodically
         self.obstacles_populated = False  # Flag to check if obstacles are populated
@@ -96,23 +96,30 @@ class RRTPlanner():
             self.obstacles_populated = True
         self._node.get_logger().info(f"Detected {len(self.obstacles)} obstacles")
 
-    def run_rrt(self, start, goal):
+    def run_rrt(self, start = None, goal = None):
         """ Run RRT algorithm to find a collision-free path """
         # path = [self.start]
-
+        if start is None: 
+            start = self.start
+        if goal is None:
+            goal = self.goal
+        start_time = time.time()
         forward_root_node = Tree_Node(state = self.start)
         self.visualize = False
         self.forward_tree = Tree(forward_root_node, visualize=self.visualize) 
         rewire_count = 0
         self.sam_states.check_state()
-        for _ in range(100000):  # Max iterations 
+        for _ in range(1000000):  # Max iterations 
             self.sam_states.check_state()
-            rand_point = self.goal_biased_sampling()
+            rand_point = self.informative_sampling(start, goal, cmax_factor=1.5)
             # self._node.get_logger().info(f"Random point: {rand_point}")
             nearest_node = Tree_Node()
             nearest_node = self.forward_tree.find_nearest_neighbor(rand_point)   # returns node with minimum cost
-            path_back = self.find_reverse_path(rand_point, nearest_node)
-            path_back_exist = len(path_back) > 0
+            if self.path_back_check:
+                path_back = self.find_reverse_path(rand_point, nearest_node) #UNCOMMENT LATER
+                path_back_exist = len(path_back) > 0
+            else:
+                path_back_exist = True
             # self._node.get_logger().info(f"Nearest node: {nearest_node.get_state()} and random point: {rand_point}")
             new_point, path_exist = self.dubins_steer(nearest_node.get_state(), rand_point)  # Steer towards the random point
             steerable = new_point != nearest_node.get_state()             
@@ -134,6 +141,8 @@ class RRTPlanner():
                     rewire_count += 1 if rewired else 0
                     # self._node.get_logger().info(f"Was tree rewired? {rewired}")
         path, cost = self.forward_tree.find_path(final_node)
+        end_time = time.time()
+        self._node.get_logger().info(f"Time taken to generate path: {end_time - start_time}")
         self._node.get_logger().info(f"Generated path with {len(path)} waypoints and rewired {rewire_count} times")
         
         #now we send this path to dubins planner to get additional waypoints.
@@ -144,9 +153,10 @@ class RRTPlanner():
         dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles)
-        # dubins_out = dubins_out_forward + dubins_out_backward[::-1]
-        self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path_back)
-        
+
+        self.visualize_tree(np.array(dubins_out_forward), path, np.array(dubins_out_backward))#UNCOMMENT LATER
+        self.visualize_tree(np.array(dubins_out_forward), path)
+
         # convert back to pose2D for transfer
         self.original_wp_indices = [int(i) for i in original_indices]
         goal_msg = self.send_waypoints(dubins_out_forward, path)
@@ -181,7 +191,7 @@ class RRTPlanner():
 
     def is_path_collision_free(self, start, end):
         base_heading = end[3]
-        step_heading = 6
+        step_heading = 12
         headings =  base_heading + np.linspace(0, 360, step_heading, endpoint = False) - 180
 
         min_cost = np.inf
@@ -234,11 +244,47 @@ class RRTPlanner():
         return rewired
 
 
-    def goal_biased_sampling(self):
+    def informative_sampling(self, start, goal, cmax_factor= np.inf):
         """ Biased sampling towards the goal """
-        if random.uniform(0, 1) < 0.1:
-            return self.goal
-        return (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180)) #random.uniform(-np.pi/6, np.pi/6))
+        if cmax_factor < np.inf:
+            cmin = np.linalg.norm((np.array(start)[0:2] - np.array(goal)[0:2]))
+            #2 dimensions on our case. heading will be decided by optimizer anyway
+            cmax = cmin*cmax_factor
+            r1 = cmax/2
+            r2 = np.sqrt(cmax**2 - cmin**2)/2
+            heading_sample_for_ellipse = random.uniform(-np.pi, np.pi)
+            a = random.uniform(0, r1)
+            b = random.uniform(0, r2)
+            x = a*np.cos(heading_sample_for_ellipse)
+            y = b*np.sin(heading_sample_for_ellipse)
+            heading_sample = random.uniform(-180, 180)
+
+            theta = np.arctan2(goal[1] - start[1], goal[0] - start[0])  # Angle of line connecting start to goal
+            rotated_x = x * np.cos(theta) - y * np.sin(theta)
+            rotated_y = x * np.sin(theta) + y * np.cos(theta)
+            midpoint = (np.array(start)[0:2] + np.array(goal)[0:2])/2
+            # plt.figure(figsize=(8, 8))
+            # plt.scatter(midpoint[0], midpoint[1], color='r', marker='x', label="Midpoint")
+            # plt.scatter(start[0], start[1], color='g', marker='s', s=150, label="Start")  # Green Square
+            # plt.scatter(goal[0], goal[1], color='y', marker='*', s=200, label="Goal")  # Yellow Star
+            ## now we plot the elipse
+            # theta1 = np.linspace(0, 2*np.pi, 100)
+            # x = r1 * np.cos(theta1)
+            # y = r2 * np.sin(theta1)
+            # x_rot = x * np.cos(theta) - y * np.sin(theta)
+            # y_rot = x * np.sin(theta) + y * np.cos(theta)
+            # plt.plot(midpoint[0] + x_rot, midpoint[1] + y_rot, color='r', label="Informed Sampling Region")
+            # plt.xlabel("X Position")
+            # plt.ylabel("Y Position")
+            # plt.title("Informed Sampling")
+            # plt.legend()
+            # plt.grid()
+            # # plt.axis("equal")  # Ensures equal scaling for X and Y
+            # plt.show()
+
+            return (midpoint[0] + rotated_x, midpoint[1] + rotated_y, 0, heading_sample)
+        else:
+            return (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180)) #random.uniform(-np.pi/6, np.pi/6))
     
     def find_reverse_path(self, state, nearest_node):
         """ Returns the path from the root to the end node."""
@@ -283,7 +329,7 @@ class RRTPlanner():
 
         return list_waypoints
     
-    def visualize_tree(self, waypoint_array_forward, waypoint_array_backward, path):
+    def visualize_tree(self, waypoint_array_forward, path, waypoint_array_backward = None):
         """ Plot the waypoints and obstacles """
         plt.figure(figsize=(8, 8))
         
@@ -293,11 +339,12 @@ class RRTPlanner():
             #     plt.scatter(waypoint_array[i][0], waypoint_array[i][1], color='g', marker='x', label="Original Waypoint" if 'Original Waypoint' not in plt.gca().get_legend_handles_labels()[1] else "")
             x, y = waypoint_array_forward[:, 0], waypoint_array_forward[:, 1]
             plt.plot(x, y, marker='o', linestyle='-', color='b', label="Path")
-            # plt.scatter(x, y, color='r', label="Waypoints")  # Highlight waypoints
-        # if len(waypoint_array_backward) > 0:
-        #     x, y = waypoint_array_backward[:, 0], waypoint_array_backward[:, 1]
-        #     plt.plot(x, y, marker='o', linestyle='-', color='r', label  = "Reverse Path")
-        #     plt.scatter(x, y, color='r')
+        #     plt.scatter(x, y, color='r', label="Waypoints")  # Highlight waypoints
+        
+        if  waypoint_array_backward is not None and len(waypoint_array_backward) > 0:
+            x, y = waypoint_array_backward[:, 0], waypoint_array_backward[:, 1]
+            plt.plot(x, y, marker='o', linestyle='-', color='r', label  = "Reverse Path")
+            plt.scatter(x, y, color='r')
 
         # Plot obstacles with their radii
         for ox, oy, _, r in self.obstacles:  # Ignoring Z
