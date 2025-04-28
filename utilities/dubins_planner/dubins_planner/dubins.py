@@ -113,19 +113,19 @@ def costPath(param,obstacle_list = None):
     """
     cost = sum(param.seg_final)
     collision = False
-    # if(obstacle_list):
+    if(obstacle_list):
 
         
         # print(f"cost , {cost}")
-        # collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
-        # discrete_path = dubins_traj(param, collision_step_size)
+        collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
+        discrete_path = dubins_traj(param, collision_step_size)
         # print(f"param startpoint {param.p_init} path : {discrete_path[-1]}")
-        # for point in discrete_path:
-        #     if not is_collision_free(point, obstacle_list):
-        #         collision = True
-        #         break
+        for point in discrete_path:
+            if not is_collision_free(point, obstacle_list):
+                collision = True
+                break
 
-        # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
+    #     # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
     return cost,collision
 
 def is_collision_free(point, obstacle_list):
@@ -232,7 +232,8 @@ def dubins_traj(param, step):
     x = 0
     length = (param.seg_final[0]+param.seg_final[1]+param.seg_final[2])*param.turn_radius
     path = []
-
+    # if param.seg_final == [0, 0, 0]:
+    #     return np.array(path)
     while x < length:
         path.append(dubins_path(param, x))
         x += step
@@ -394,20 +395,21 @@ def main():
     # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
     # waypoints, angles = waypoints_with_yaw(waypoints)
     wp1 = Waypoint(-10,5,0)
-    wp2 = Waypoint(20,5,180)
+    wp2 = Waypoint(20,5,0)
     waypoints = [wp1, wp2]
-    turn_radius = 1
-    step = 0.01
+    turn_radius = 10
+    step = 5
     obstacle_list = [(5,5,0,5)]
     # param = calc_dubins_path(wp1, wp2, turn_radius, obstacle_list)
     param = calc_dubins_path(wp1, wp2, turn_radius)
 
-    print(param.type)
+    # print(param.type)
     print(param.seg_final)
+    print(sum(param.seg_final))
     # complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step, obstacle_list)
     complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step)
-
-    # print(complete_path)
+    
+    print(complete_path)
     # print(original_wp_indices)
     plt.figure(figsize=(8, 8))
     complete_path_array = np.array(complete_path)

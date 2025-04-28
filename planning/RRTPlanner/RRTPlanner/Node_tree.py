@@ -6,6 +6,7 @@ class Tree_Node:
         self._parent = parent
         self._state = state
         self._cost = cost
+        
     
     def assign_state(self, state):
         self._state = state  #state is a tuple of coordinates, (x,y,z), and the relevant sensor data. It will decide the next action to take
@@ -17,11 +18,15 @@ class Tree_Node:
         self._children = children
 
     def assign_parent(self, parent):
+        
         self._parent = parent
 
     def add_child(self, child):
         self._children.append(child)
-    
+
+    def assign_cost(self, cost):
+        self._cost = cost
+        
     def get_parent(self):
         return self._parent
     
@@ -34,6 +39,9 @@ class Tree_Node:
     def get_state(self):
         return self._state
     
+    def get_cost(self):
+        return self._cost
+    
     def copy(self):
         return Tree_Node(self._parent, self._cost, self._state)
     
@@ -45,6 +53,7 @@ class Tree:
         self._root = root
         self._nodes = [root]  # List of all nodes in the tree
         self._edges = []  # Store edges (parent-child connections)
+        self.scale_yaw = 2*np.pi/180.0
         self._visualize = visualize
         if self._visualize:
             # Initialize Matplotlib plot
@@ -69,27 +78,53 @@ class Tree:
     def get_root(self):
         return self._root
 
-    def cost(self, start, end):
-        """ As of not it is just ditsance between two points. Can be modified to include other factors like information gain from parent to child etc;
+    # def cost(self, start, end):
+    #     """ As of not it is just ditsance between two points. Can be modified to include other factors like information gain from parent to child etc;
+    #      in which case the state will have to be expanded to include that information"""
+    #     return np.linalg.norm(np.array(start.get_state()) - np.array(end.get_state()))
+        
+    def cost(self, node):
+        """ As of not it is just ditsance between two points. Can be modified to include 
+         other factors like information gain from parent to child etc;
          in which case the state will have to be expanded to include that information"""
-        return np.linalg.norm(np.array(start.get_state()) - np.array(end.get_state()))
+        return node.get_cost()
     
-    def get_cost(self, start, end):
-        if start == None:
-            return 0
-        return self.cost(start, end)
+    # def get_cost(self, start, end):
+    #     if start == None:
+    #         return 0
+    #     return self.cost(start, end)
     
+    def get_cost(self, node):
+        # if start == None:
+        #     return 0
+        return self.cost(node)
+
     def find_nearest_neighbor(self, state):
         """ Returns the closest node to a given state """
         if not self._nodes:
             return None  # No nodes in the tree
-        return min(self._nodes, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
+        return min(
+        self._nodes,
+        key=lambda node: np.linalg.norm(
+            np.array(node.get_state())[0:2] - np.array(state)[0:2]
+        )**2 + np.linalg.norm(
+            self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
+        )**2
+        )
 
     def find_nearest_neighbors(self, state):
         """ Returns a sorted list of nodes based on proximity to the given state """
         if not self._nodes:
             return []  # No nodes in the tree
-        return sorted(self._nodes, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
+        # return sorted(self._nodes, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
+        return sorted(
+        self._nodes,
+        key=lambda node: np.linalg.norm(
+            np.array(node.get_state())[0:2] - np.array(state)[0:2]
+        )**2 + np.linalg.norm(
+            self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
+        )**2
+        )
 
     def visualize_tree(self):
         self.ax.clear()  # Clear previous frame
@@ -119,11 +154,12 @@ class Tree:
         cost_cumulative = 0
         path.append(end)
         parent = end.get_parent()
-        cost_cumulative += self.cost(parent, end)
+        # cost_cumulative += self.cost(parent, end)
+        cost_cumulative += self.get_cost(end)
 
         while parent is not None:
             path.append(parent)
-            cost_cumulative += self.get_cost(parent.get_parent(), parent)
+            cost_cumulative += self.get_cost(parent)
             parent = parent.get_parent()
             if parent == end:
                 break  # Avoid infinite loops

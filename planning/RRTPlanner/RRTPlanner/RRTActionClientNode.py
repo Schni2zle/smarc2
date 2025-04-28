@@ -39,7 +39,7 @@ class DiveToWaypointActionClient():
         self.current_waypoint = None
         self.next_waypoint = None
         self.waypoint_queue = []
-
+        self.wps_traversed = True
         #subscribing to next waypoint
         # self._node.create_subscription(PoseStamped, f'/sam_auv_v1/{MissionTopics.WAYPOINT_TOPIC}', self.waypoint_cb, 10)
 
@@ -85,11 +85,19 @@ class DiveToWaypointActionClient():
             if self.assign_next_waypoint():
                 self.send_goal()
             else:
+                self.wps_traversed = True
                 self._loginfo("No more waypoints left. Stopping.")
         else:
             self._loginfo(f"NOT Success: Status:{status}, result:{result.reached_waypoint}")
-
+            print((f"NOT Success: Status:{status}, result:{result.reached_waypoint}"))
         # rclpy.shutdown()
+    # def check_queue_for_waypoint(self):
+    #     if self.waypoint_queue:
+            
+    #         return True
+    #     else:
+    #         print("no waypoints in queue")
+    #         return False
 
     def assign_next_waypoint(self):
         if self.waypoint_queue :
@@ -110,12 +118,12 @@ class DiveToWaypointActionClient():
 
         self._loginfo("Waiting for server to come alive")
         server_is_ready = self._ac.wait_for_server(timeout_sec=30)
-
+        
         if not server_is_ready:
             self._loginfo("Server was not availble, quitting!")
             rclpy.shutdown()
             return
-
+        self.wps_traversed = False  #where should this go?
         goal_msg = GotoWaypoint.Goal()
         if self.current_waypoint is None:
             self.current_waypoint = PoseStamped()
