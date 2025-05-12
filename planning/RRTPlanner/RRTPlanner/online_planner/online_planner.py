@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import tf_transformations
 from dubins_planner.dubins import Waypoint, calc_dubins_path, sample_complete_plan, sample_between_wps
 from RRTPlanner.sam_auv_node import StateInformation
+from estimator2 import GP2DTrainer
 
 class RRTPlanner():
     def __init__(self,
@@ -47,8 +48,7 @@ class RRTPlanner():
             self.goal = goal
         self.goal_tolerance = goal_tolerance  # Goal tolerance radius
         self.informed_param = np.inf
-        self.rewiring_distance = 60.0  # Rewiring distance
-        self.rewiring_limit = 60  # Rewiring limit
+        
         self.wp_count = 0
         self.timer = self._node.create_timer(0.1, self.online_manager)  # Timer to get obstacles periodically
         self.obstacles_populated = False  # Flag to check if obstacles are populated
@@ -64,13 +64,27 @@ class RRTPlanner():
         self.tree = None
         # self.tree = None
         self.backward_tree = None
-        self.rewire_count = 0
+        
         # RRT parameters
         self.stepsize = 8.0
-        self.turning_radius = 3.0
+        self.turning_radius = 6.0
         self.step_dubins = 1
         self.original_wp_indices = []
+        self.trainer = GP2DTrainer(bounds=(0, 100), resolution=20, inducing_count=50, training_iter=700)
 
+        #rewiring params
+        self.verbose = True
+        self.rewiring_distance = 60.0  # Rewiring distance
+        self.rewiring_limit = 60  # Rewiring limit
+        self.rewire_count = 0
+        self.scale_uncertainty = 50.0
+
+        #hyperparams for learning 
+        self.LAMBDA  = 0.1
+
+        #train the surrogate model
+        self.trainGP()
+        
     def get_pose(self):
         """ Get initial orientation of the robot """
         trans = TransformStamped()
@@ -220,15 +234,15 @@ class RRTPlanner():
                 if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles)
 
-        self._node.get_logger().info(f"the original indices : {original_indices}")
+        # self._node.get_logger().info(f"the original indices : {original_indices}")
 
         self.original_wp_indices = [int(i) for i in original_indices]
         # dubins_out = dubins_out_forward + dubins_out_backward[::-1]
-        self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True)
+        self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=False)
         
         # give waypoints till the first original index to fawllow
         dubins_first_waypoint = dubins_out_forward[0:self.original_wp_indices[1]+1]
-        self._node.get_logger().info(f"first waypoint : {dubins_first_waypoint}")
+        # self._node.get_logger().info(f"first waypoint : {dubins_first_waypoint}")
         goal_msg = self.send_waypoints(dubins_first_waypoint, path)
 
         # #we disconnect the tree from the current node as soon as we are done executing the path by changing the root to the next node
@@ -248,6 +262,11 @@ class RRTPlanner():
         np.linalg.norm(np.array(node.get_state())[0:2] - np.array(final_node.get_state())[0:2]))
         for node in self.path),
         key=lambda x: x[1])
+        
+        #HYPERPARAMETER FOR UNCERTAINTY
+        # LAMBDA = 0.1
+        path_uncertainty = self.compute_path_uncertainty(self.path)
+        c_best = max_distance + self.LAMBDA * path_uncertainty
 
         #now we rewire the tree
         rand_point = self.informative_sampling(start_node.get_state(), final_node.get_state(), cmax = max_distance)
@@ -303,12 +322,14 @@ class RRTPlanner():
         for final_node_candidate in self.final_node_list :
             
             path, cost = tree.find_path(final_node_candidate)
-            self._node.get_logger().info(f"Final node candidate: {final_node_candidate.get_state()} with cost {cost}")
+            if self.verbose:
+                self._node.get_logger().info(f"Final node candidate: {final_node_candidate.get_state()} with cost {cost}")
             if cost < min_cost:
                 min_cost = cost
                 self.path = path
                 self.final_node = final_node_candidate
-        self._node.get_logger().info(f"best cost: {min_cost}")
+        if self.verbose:
+            self._node.get_logger().info(f"best cost: {min_cost}")
     
     def dubins_steer(self, start, end, free_range = True):
         """ Move from start towards end by step_size """
@@ -405,6 +426,7 @@ class RRTPlanner():
                     #compute cost of new path and old path
                     # self._node.get_logger().info(f"rewiring node check")
                     old_path,old_cost = tree.find_path(new_node)
+
                     # node.assign_parent(new_node)
                     new_path,cost_till_new = tree.find_path(node)
                     new_cost = new_cost_segment + cost_till_new
@@ -437,11 +459,30 @@ class RRTPlanner():
                     #compute cost of new path and old path
                     # self._node.get_logger().info(f"rewiring node check")
                     old_path,old_cost = tree.find_path(node)
+                    old_uncertainty_cost = self.compute_path_uncertainty(old_path) 
+                    old_cost_adjusted = old_cost - old_uncertainty_cost
                     # node.assign_parent(new_node)
                     new_path,cost_till_new = tree.find_path(new_node)
-                    new_cost = new_cost_segment +  cost_till_new
+                    new_uncertainty_cost = self.compute_path_uncertainty(new_path)
+                    new_cost = new_cost_segment +  cost_till_new  
+                    new_cost_adjusted = new_cost - new_uncertainty_cost
+
+                    if self.verbose:
+                        # print(f"\n[REWIRING CHECK] Node ID: {node.get_id()}")
+                        print(f"  - Old total cost: {old_cost:.4f}")
+                        print(f"  - Old uncertainty cost: {old_uncertainty_cost:.4f}")
+                        print(f"  - Adjusted old cost: {old_cost_adjusted:.4f}")
+                        print(f"  - New path segment cost: {new_cost:.4f}")
+                        print(f"  - New uncertainty cost: {new_uncertainty_cost:.4f}")
+                        print(f"  - New total cost: {new_cost_adjusted:.4f}")
+
+                        if new_cost_adjusted < old_cost_adjusted:
+                            print("  → REWIRING: new path is better after uncertainty adjustment")
+                            ...
+                        else:
+                            print("  ✗ No rewiring: old path remains better")
                     #compare costs
-                    if new_cost < old_cost:
+                    if new_cost_adjusted < old_cost_adjusted:
                         rewired = True
                         old_parent = node.get_parent()
                         # old_parent.remove_child(node)
@@ -452,11 +493,107 @@ class RRTPlanner():
                         node.assign_parent(new_node)
                         new_node.add_child(node)
                         node.assign_cost(new_cost_segment)
+                        
+
+
                         continue
                     # else:
                     #     node.assign_parent(old_path[-2])
 
         return rewired
+
+    # def rewiring(self, new_node, tree=None):
+    #     """ Rewire the tree to maximize uncertainty from GP model """
+    #     if tree is None:
+    #         tree = self.tree
+
+    #     rewired = False
+    #     rewiring_distance = self.rewiring_distance
+    #     gamma = 2.0
+    #     n_nodes = len(tree.get_nodes())
+    #     d = 2  # dimensions
+    #     rewiring_distance = self.rewiring_distance * gamma * (np.log(n_nodes) / n_nodes) ** (1 / d)
+        
+    #     node_list = tree.find_nearest_neighbors(new_node.get_state())
+
+    #     for iter, node in enumerate(node_list):
+    #         if iter == self.rewiring_limit:
+    #             break
+
+    #         valid_node = node != new_node
+    #         distance = np.linalg.norm(np.array(new_node.get_state())[0:2] - np.array(node.get_state())[0:2])
+
+    #         if valid_node:
+    #             path_exist, best_heading, _ = self.is_path_collision_free(node.get_state(), new_node.get_state())
+    #             if path_exist:
+    #                 # --- Compute GP uncertainty gain ---
+    #                 # 1. Uncertainty following current parent
+    #                 old_path, _ = tree.find_path(new_node)
+    #                 old_uncertainty = self.compute_path_uncertainty(old_path)
+
+    #                 # 2. Uncertainty if reparented through 'node'
+    #                 # Simulate assigning parent
+    #                 simulated_path = self.simulate_path(node, new_node)
+    #                 new_uncertainty = self.compute_path_uncertainty(simulated_path)
+
+    #                 # --- Compare uncertainties ---
+    #                 if new_uncertainty > old_uncertainty:
+    #                     rewired = True
+    #                     old_parent = new_node.get_parent()
+    #                     if old_parent is not None:
+    #                         children = old_parent.get_children()
+    #                         children.remove(new_node)
+    #                         old_parent.assign_children(children)
+                        
+    #                     # Rewire
+    #                     new_state = new_node.get_state()
+    #                     new_state = (new_state[0], new_state[1], new_state[2], best_heading)
+    #                     new_node.assign_state(new_state)
+    #                     new_node.assign_parent(node)
+    #                     node.add_child(new_node)
+    #                     # (Optional: assign dummy cost)
+    #                     new_node.assign_cost(0.0)
+    #                     continue
+    #     return rewired
+
+    def compute_path_cost(self, path):
+        """Compute cumulative cost along a path"""
+        cost_sum = 0.0
+        for node in path:
+            cost = node.get_cost()
+            cost_sum += cost
+        return cost_sum
+    
+    def synthetic_uncertainty(self, x, y):
+        cx1,cy1 = 30, -20
+        cx2,cy2 = 50, 20
+        sigma = 10
+        return 5 * np.exp(-((x - cx1) ** 2 + (y - cy1) ** 2) / (2 * sigma ** 2)) + 5 * np.exp(-((x - cx2) ** 2 + (y - cy2) ** 2) / (2 * sigma ** 2))
+
+    def compute_path_uncertainty(self, path):
+        """Compute cumulative GP variance (uncertainty) along a path"""
+        uncertainty_sum = 0.0
+        for node in path:
+            x,y = node.get_state()[0:2]
+            mean, std_dev = self.trainer.cost_at_sample(x, y)
+
+            #test case time
+
+            # if y< -5:
+            #     std_dev = 1
+            std_dev = self.synthetic_uncertainty(x,y)
+            uncertainty_sum += std_dev**2  # Variance, not standard deviation
+        return uncertainty_sum*self.scale_uncertainty
+
+    def simulate_path(self, parent_node, child_node):
+        """Helper to simulate a fake path if rewired"""
+        simulated_path = []
+        node = child_node
+        while node is not None and node != parent_node:
+            simulated_path.append(node)
+            node = node.get_parent()
+        simulated_path.append(parent_node)
+        return list(reversed(simulated_path))
 
     def goal_biased_sampling(self):
         """ Biased sampling towards the goal """
@@ -505,8 +642,6 @@ class RRTPlanner():
             return (midpoint[0] + rotated_x, midpoint[1] + rotated_y, 0, heading_sample)
         else:
             return (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180)) #random.uniform(-np.pi/6, np.pi/6))
-
-
     
     def reconnect_to_tree(self, state ):
         """Reconnects the current measured state to the tree and sets it as the new root."""
@@ -557,6 +692,7 @@ class RRTPlanner():
             # final_tree_node = forward_tree.find_nearest_neighbor(final_node.get_state())
             self._node.get_logger().info(f"final node is : {final_tree_node.get_state()}")
             path_forward ,cost= forward_tree.find_path(final_tree_node)
+
             if len(path_forward) == 2:
                 #path length being 2 means that the goal is the immediate next waypoint
                 final_wp = True
@@ -767,9 +903,14 @@ class RRTPlanner():
 
         return list_waypoints
         
-    def visualize_tree(self, waypoint_array_forward, waypoint_array_backward, path, tree = None, visualize_back = True):
+    def visualize_tree(self, waypoint_array_forward, waypoint_array_backward, path, tree = None, visualize_back = True, xx =None, yy = None, pred_mean = None, pred_std = None):
+
         """ Plot the waypoints and obstacles """
         plt.figure(figsize=(8, 8))
+        if xx is not None:
+            # Plot the GP uncertainty map first (so it's in the background)
+            std_plot = plt.contourf(xx.numpy(), yy.numpy(), pred_std.numpy(), levels=20, cmap="viridis", alpha=0.5)
+            plt.colorbar(std_plot, label="Predictive Stddev (Uncertainty)")
         if tree is None:
             tree = self.tree
         # Plot waypoints
@@ -819,7 +960,18 @@ class RRTPlanner():
         plt.scatter(start_x, start_y, color='g', marker='s', s=150, label="Start")  # Green Square
         plt.scatter(goal_x, goal_y, color='y', marker='*', s=200, label="Goal")  # Yellow Star
 
+        # std_plot = plt.contourf(xx.numpy(), yy.numpy(), pred_std.numpy(), levels=20, cmap="magma")
+        # # axs[2].set_title("GP Predictive Stddev (Uncertainty)")
+        # plt.figure.colorbar(std_plot)
+        x = np.linspace(0, 100, 100)
+        y = np.linspace(-50, 50, 100)
+        xx, yy = np.meshgrid(x, y)
+        pred_std = self.synthetic_uncertainty(xx, yy)
+        std_plot = plt.contourf(xx,yy, pred_std, levels=20, cmap="viridis", alpha=0.5)
+        plt.colorbar(std_plot)
         # Plot settings
+        plt.xlim(0, 100)
+        plt.ylim(-50, 50)
         plt.xlabel("X Position")
         plt.ylabel("Y Position")
         plt.title("Waypoint Path with Obstacles")
@@ -828,6 +980,13 @@ class RRTPlanner():
         plt.axis("equal")  # Ensures equal scaling for X and Y
         plt.show()
 
+    def trainGP(self):
+        """train the surrogate model of the GP"""
+        self.trainer.plot_training_data()
+        self.trainer.train()
+        xx, yy, pred_mean, pred_std = self.trainer.predict()
+        self.trainer.plot_results(xx, yy, pred_mean, pred_std)
+        
     def online_manager(self):
         """ Periodically check for obstacles and run RRT """
         start = None
@@ -839,11 +998,28 @@ class RRTPlanner():
         if not self.get_pose()[0]:
             self._node.get_logger().info("Waiting for initial pose")
             return
+        # if self.start[3] is None:
+        #         self.start = (self.get_pose()[0], self.get_pose()[1], 0, self.get_pose()[2])
+        # lambda_values = [0.1, 0.5, 1.0, 2.0]
+        # # lambda_values = [0.1, 0.5]
+        # stat_table = {}
+        # for lambda_value in lambda_values:
+        #     self.LAMBDA = lambda_value
+        #     self._node.get_logger().info(f"Running evaluation with lambda: {lambda_value}")
+        #     stat_table[lambda_value] = self.run_evaluation_loop(n_trials=5, use_gp=True, visualize=False)
+        # self.plot_total_cost_vs_lambda(stat_table)
+        # self.plot_path_and_uncertainty_vs_lambda(stat_table)
+
+        # self.timer.cancel()
+        # self.run_evaluation_loop(n_trials=1, use_gp=False, visualize=False)
         else:
             if self.start[3] is None:
                 self.start = (self.get_pose()[0], self.get_pose()[1], 0, self.get_pose()[2]) 
                 self._node.get_logger().info(f"Initial pose: {self.start}")
                 start = self.start
+                self._node.get_logger().info("Train GP Model")
+                #train
+                # self.trainGP()
                 self.initialize_tree(self.start)
                 #maybe RRT here
                 self._node.get_logger().info("Running RRT")
@@ -909,6 +1085,99 @@ class RRTPlanner():
         # else : 
         #     self._node.get_logger().info("Tree not initialized")
         #     return
+
+    def run_evaluation_loop(self, n_trials=10, use_gp=True, visualize=True):
+        """
+        Run multiple planning trials with a fixed goal.
+        Useful for evaluating different lambda values or planner variants.
+        """
+        stats = {
+            "success": 0,
+            "path_lengths": [],
+            "uncertainties": [],
+            "total_costs": [],
+            "failures": [],
+        }
+
+        for trial in range(n_trials):
+            self._node.get_logger().info(f"Trial {trial + 1}/{n_trials}")
+            self.initialize_tree(self.start)
+
+            # # 1. Get fresh start and obstacle data
+            # self.get_obstacles_from_tf()
+            # start_pose = self.get_pose()
+            # if not start_pose[0]:
+            #     self._node.get_logger().warn("No pose. Skipping trial.")
+            #     stats["failures"].append("no_pose")
+            #     continue
+            # self.start = (start_pose[0], start_pose[1], 0, start_pose[2])
+            # self.initialize_tree(self.start)
+
+            # # 2. Optionally train GP model
+            # if use_gp:
+            #     self.trainGP()
+
+            # 3. Run RRT and record path
+            self._node.get_logger().info("Running RRT...")
+            #path is goal_msg akshually
+            path, final_wp_reached = self.run_rrt(self.start, self.goal)
+            if path is None:
+                self._node.get_logger().warn("Failed to reach goal.")
+                stats["failures"].append("rrt_fail")
+                continue
+
+            # 4. Evaluate results
+            path_length = self.compute_path_cost(self.path)
+            #if i give self.path here it means we check for the bigger waypoints and not hte dubins ones. If I do path, it will be dubins but Ill have to change logic for posestamped from the node_tree
+            uncertainty_cost = self.compute_path_uncertainty(self.path)
+            lambda_weight = self.LAMBDA if hasattr(self, 'LAMBDA') else 1.0
+            total_cost = path_length + lambda_weight * uncertainty_cost
+
+            stats["success"] += 1
+            stats["path_lengths"].append(path_length)
+            stats["uncertainties"].append(uncertainty_cost)
+            stats["total_costs"].append(total_cost)
+
+            self._node.get_logger().info(f"Path length: {path_length:.2f}, Uncertainty: {uncertainty_cost:.2f}, Total: {total_cost:.2f}")
+
+            # 5. Optional visualization
+            if visualize:
+                self.visualize_tree(waypoint_array_forward=np.array(path), waypoint_array_backward=[], path=path)
+
+        # 6. Summary
+        self._node.get_logger().info("Evaluation Done")
+        self._node.get_logger().info(f"Success rate: {stats['success']}/{n_trials}")
+        return stats
+    
+    def plot_path_and_uncertainty_vs_lambda(self, stat_table):
+        lambdas = sorted(stat_table.keys())
+        path_lengths = [np.mean(stat_table[lam]['path_lengths']) for lam in lambdas]
+        uncertainties = [np.mean(stat_table[lam]['uncertainties']) for lam in lambdas]
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(lambdas, path_lengths, 'bo-', label="Path Length")
+        plt.plot(lambdas, uncertainties, 'ro-', label="Uncertainty Cost")
+        plt.xlabel("Lambda")
+        plt.ylabel("Cost Component Value")
+        plt.title("Path Length vs Uncertainty vs Lambda")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+    def plot_total_cost_vs_lambda(self, stat_table):
+        lambdas = sorted(stat_table.keys())
+        means = [np.mean(stat_table[lam]['total_costs']) for lam in lambdas]
+        stds = [np.std(stat_table[lam]['total_costs']) for lam in lambdas]
+
+        plt.figure(figsize=(8, 5))
+        plt.errorbar(lambdas, means, yerr=stds, fmt='o-', capsize=5, label="Total Cost")
+        plt.xlabel("Lambda (Weight on Uncertainty)")
+        plt.ylabel("Total Cost (Path + λ·Uncertainty)")
+        plt.title("Total Cost vs Lambda")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
 
 def main():
     rclpy.init(args=sys.argv)

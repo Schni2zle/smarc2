@@ -135,7 +135,7 @@ class DiveToWaypointActionClient():
         goal_msg.waypoint.pose.header.stamp = self.rcl_time_to_stamp(self._node.get_clock().now())
         #TODO: decide if these values should be assigned here
         goal_msg.waypoint.travel_rpm = 500.0
-        goal_msg.waypoint.goal_tolerance = 1.0
+        goal_msg.waypoint.goal_tolerance = 5.0  #set to high number
         
         self._loginfo(f"Sending goal: {[self.current_waypoint.pose.position.x, self.current_waypoint.pose.position.y, self.current_waypoint.pose.position.z]}")
 

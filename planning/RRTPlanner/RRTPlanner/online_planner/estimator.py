@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+import gpytorch
 
 class EnvironmentalFieldGP:
     def __init__(self, field_func=None, bounds=(0, 100), resolution=100, noise_std=0.5):
@@ -90,7 +91,7 @@ def main():
 
     env_field_gp = EnvironmentalFieldGP(field_func=field_func, bounds=(0, 100), resolution=100, noise_std = 0.2)
     env_field_gp.surrogate_model()
-    for i in range(100):
+    for i in range(500):
         pred = env_field_gp.model_update()
     env_field_gp.plot_field(pred)
 

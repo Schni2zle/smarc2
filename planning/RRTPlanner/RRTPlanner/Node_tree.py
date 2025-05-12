@@ -6,7 +6,7 @@ class Tree_Node:
         self._parent = parent
         self._state = state
         self._cost = cost
-        
+        self._other_cost = 0
     
     def assign_state(self, state):
         self._state = state  #state is a tuple of coordinates, (x,y,z), and the relevant sensor data. It will decide the next action to take
@@ -26,6 +26,9 @@ class Tree_Node:
 
     def assign_cost(self, cost):
         self._cost = cost
+
+    def assign_other_cost(self, cost):
+        self._other_cost = cost
         
     def get_parent(self):
         return self._parent
@@ -41,6 +44,9 @@ class Tree_Node:
     
     def get_cost(self):
         return self._cost
+    
+    def get_total_cost(self):
+        return self._cost + self._other_cost
     
     def copy(self):
         return Tree_Node(self._parent, self._cost, self._state)
