@@ -123,7 +123,10 @@ class DiveToWaypointActionClient():
             self._loginfo("Server was not availble, quitting!")
             rclpy.shutdown()
             return
-        self.wps_traversed = False  #where should this go?
+        if self.wps_traversed:
+            self._loginfo("resetting traversed bool and current waypoint")
+            self.current_waypoint = None
+            self.wps_traversed = False  #where should this go?
         goal_msg = GotoWaypoint.Goal()
         if self.current_waypoint is None:
             self.current_waypoint = PoseStamped()

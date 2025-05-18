@@ -102,12 +102,12 @@ class SKIGaussianProcessEstimator:
 
     def plot_field(self, xx, yy, mean, std=None, samples=None, title="SKI GP Estimated Field"):
         plt.figure(figsize=(8, 6))
-        # cp = plt.contourf(xx, yy, mean, cmap='viridis')
-        # plt.colorbar(cp, label="Mean Prediction")
+        cp = plt.contourf(xx, yy, mean, cmap='viridis')
+        plt.colorbar(cp, label="Mean Prediction")
 
-        if std is not None:
-            plt.contour(xx, yy, std, levels=10, cmap='Reds', alpha=0.6)
-            plt.colorbar(label="Uncertainty")
+        # if std is not None:
+        #     plt.contour(xx, yy, std, levels=10, cmap='Reds', alpha=0.6)
+        #     plt.colorbar(label="Uncertainty")
 
         if samples is not None:
             px, py = zip(*samples)
