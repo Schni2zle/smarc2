@@ -47,7 +47,7 @@ def wrapTo180(angle):
         angle -= 360;
     return angle
 
-def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
+def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None, obstacle_tree = None):
     # Calculate a dubins path between two waypoints
     param = Param(wpt1, 0, 0)
     tz        = [0, 0, 0, 0, 0, 0]
@@ -88,7 +88,7 @@ def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
             # print(f"distance between waypoints {D}")
             # print(f"Trying path {param2.type} and segment {param2.seg_final}")
             if (obstacle_list):
-                cost,collision = costPath(param2, obstacle_list)
+                cost,collision = costPath(param2, obstacle_list, obstacle_tree)
                 # print(f"collision {collision}")
             else:
                 cost,collision = costPath(param2)
@@ -104,7 +104,7 @@ def calc_dubins_path(wpt1, wpt2, turn_radius, obstacle_list = None):
     # print("Best path: ", param.type)
     return param
 
-def costPath(param,obstacle_list = None):
+def costPath(param,obstacle_list = None, obstacle_tree = None):
     """
     Calculate the cost as the length of a Dubins path
     then we check for obstacles
@@ -117,26 +117,39 @@ def costPath(param,obstacle_list = None):
 
         
         # print(f"cost , {cost}")
-        collision_step_size = 0.5  #how to pass this parameter hmmmmmmmmm
+        collision_step_size = 2 #how to pass this parameter hmmmmmmmmm
         discrete_path = dubins_traj(param, collision_step_size)
+        # max_radius = max(r for _, _, _, r in obstacle_list)
+        _, _, _, radius = obstacle_list[0]
         # print(f"param startpoint {param.p_init} path : {discrete_path[-1]}")
         for point in discrete_path:
-            if not is_collision_free(point, obstacle_list):
+            if not is_collision_free(point, obstacle_list, obstacle_tree, radius):
                 collision = True
                 break
 
     #     # print(f"{param.type} Cost : {cost} and  Collision: ", collision)
     return cost,collision
 
-def is_collision_free(point, obstacle_list):
-        """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
-        px, py, _ = point  # Ignore z
-        for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
-            dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
-            # print(f"Checking point {px, py} with obstacle {ox, oy, r} and distance {dist}")
-            if dist < r:
-                return False
-        return True
+def is_collision_free(point, obstacle_list, obstacle_tree, radius):
+    """ Check if the point collides with any obstacle (ignoring z, so hardcoded for cylindrical obstacles) """
+    # px, py, _ = point  # Ignore z
+    # for ox, oy, _, r in obstacle_list:  # Ignore obstacle's z
+    #     dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
+    #     # print(f"Checking point {px, py} with obstacle {ox, oy, r} and distance {dist}")
+    #     if dist < r*1.3:  # 1.3 is a safety factor
+    #         return False
+    # return True
+
+    px, py, _ = point
+    # Query KDTree for nearby obstacles within safety margin
+    indices = obstacle_tree.query_ball_point([px, py, 0], r=radius * 1.3)
+    
+    for idx in indices:
+        ox, oy, _, r = obstacle_list[idx]
+        dist = np.linalg.norm(np.array([px, py]) - np.array([ox, oy]))
+        if dist < r * 1.3:
+            return False
+    return True
 
 # Compute all Dubins options
 def dubinsLSL(alpha, beta, d):
@@ -342,20 +355,17 @@ def circle_line_segment_intersection(circle_center, circle_radius, pt1, pt2, ful
         else:
             return intersections
 
-
-
-def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None):
+def sample_between_wps(wp_from, wp_to, turn_radius, step, obstacle_list = None, obstacle_tree = None):
     if obstacle_list is not None:
         # print("Obstacle list is not None")
-        path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius, obstacle_list), step)
+        path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius, obstacle_list, obstacle_tree=obstacle_tree), step)
     else:
         path = dubins_traj(calc_dubins_path(wp_from, wp_to, turn_radius), step)
     # ignore the first and last points in the path, since
     # the first is wp_from and last is step-close to wp_to
     return path[1:-1]
 
-
-def sample_complete_plan(waypoints, turn_radius, step, obstacle_list = None):
+def sample_complete_plan(waypoints, turn_radius, step, obstacle_list = None, obstacle_tree = None):
     """
     Sample between each WP in the list of Waypoints and return
     one list of waypoints with all the in-betweens and another list
@@ -375,7 +385,7 @@ def sample_complete_plan(waypoints, turn_radius, step, obstacle_list = None):
         next_wp = waypoints[i+1]
         curr_wp = waypoints[i]
         if obstacle_list is not None:
-            sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step, obstacle_list)
+            sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step, obstacle_list, obstacle_tree)
         else:
             sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step)
         original_wp_indices.append(len(complete_path))
@@ -394,8 +404,8 @@ def main():
     # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
     # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
     # waypoints, angles = waypoints_with_yaw(waypoints)
-    wp1 = Waypoint(-10,5,0)
-    wp2 = Waypoint(20,5,0)
+    wp1 = Waypoint(-10,0,0)
+    wp2 = Waypoint(10,0,0)
     waypoints = [wp1, wp2]
     turn_radius = 10
     step = 5
@@ -403,7 +413,7 @@ def main():
     # param = calc_dubins_path(wp1, wp2, turn_radius, obstacle_list)
     param = calc_dubins_path(wp1, wp2, turn_radius)
 
-    # print(param.type)
+    print(param.type)
     print(param.seg_final)
     print(sum(param.seg_final))
     # complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step, obstacle_list)

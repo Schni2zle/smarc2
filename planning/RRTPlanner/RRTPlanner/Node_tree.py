@@ -1,12 +1,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
 class Tree_Node:
-    def __init__(self, parent =  None, cost = 0, state = None):
+    def __init__(self, parent =  None, cost = 0, state = None, param = None):
         self._children = []
         self._parent = parent
         self._state = state
         self._cost = cost
         self._other_cost = 0
+        self._param = param
     
     def assign_state(self, state):
         self._state = state  #state is a tuple of coordinates, (x,y,z), and the relevant sensor data. It will decide the next action to take
@@ -26,6 +27,9 @@ class Tree_Node:
 
     def assign_cost(self, cost):
         self._cost = cost
+    
+    def assign_param(self, param):
+        self._param = param
 
     def assign_other_cost(self, cost):
         self._other_cost = cost
@@ -53,6 +57,10 @@ class Tree_Node:
     
     def reset_children(self):
         self._children = []
+
+    def get_param(self):
+        return self._param
+    
 
 class Tree:
     def __init__(self, root, visualize = False):
@@ -181,6 +189,7 @@ class Tree:
         self._root = root
         root.assign_parent(None)
         return root
+    
 
 
 def copy_tree(node, parent=None, tree = None, final_node = None):    
