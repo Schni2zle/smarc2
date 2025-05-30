@@ -1,13 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.spatial import KDTree
+import numbers
 class Tree_Node:
-    def __init__(self, parent =  None, cost = 0, state = None, param = None):
+    def __init__(self, parent =  None, cost = 0, state = None, param = None, path_back = []):
         self._children = []
         self._parent = parent
         self._state = state
         self._cost = cost
         self._other_cost = 0
         self._param = param
+        self._return_path = path_back
     
     def assign_state(self, state):
         self._state = state  #state is a tuple of coordinates, (x,y,z), and the relevant sensor data. It will decide the next action to take
@@ -33,13 +36,13 @@ class Tree_Node:
 
     def assign_other_cost(self, cost):
         self._other_cost = cost
+
+    def assign_return_path(self,path):
+        self._return_path = path
         
     def get_parent(self):
         return self._parent
-    
-    def get_root(self):
-        return self._root
-    
+
     def get_children(self):
         return self._children
     
@@ -61,6 +64,9 @@ class Tree_Node:
     def get_param(self):
         return self._param
     
+    def get_return_path(self):
+        return self._return_path
+    
 
 class Tree:
     def __init__(self, root, visualize = False):
@@ -77,14 +83,21 @@ class Tree:
             self.ax.set_ylim(0, 100)
             self.ax.set_title("RRT* Tree Growth")
 
+        self._positions = [np.array(root.get_state())[0:2]]  # For KDTree
+        self._kdtree = KDTree(self._positions)
+
     def add_node(self, node):
         self._nodes.append(node)
+        self._positions.append(np.array(node.get_state())[0:2])  # Add position for KDTree
+        self._kdtree = KDTree(self._positions)  # Rebuild KDTree (for small trees this is fine)
+
         if node.get_parent():
             parent = node.get_parent()
             parent.add_child(node)
-            self._edges.append((node.get_parent(), node))  # Store edge
+            self._edges.append((parent, node))
+
         if self._visualize:
-            self.visualize_tree()  # Update visualization dynamically
+            self.visualize_tree()
 
     def get_nodes(self):
         return self._nodes
@@ -113,32 +126,57 @@ class Tree:
         #     return 0
         return self.cost(node)
 
+    # def find_nearest_neighbor(self, state):
+    #     """ Returns the closest node to a given state """
+    #     if not self._nodes:
+    #         return None  # No nodes in the tree
+    #     return min(
+    #     self._nodes,
+    #     key=lambda node: np.linalg.norm(
+    #         np.array(node.get_state())[0:2] - np.array(state)[0:2]
+    #     )**2 + np.linalg.norm(
+    #         self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
+    #     )**2
+    #     )
     def find_nearest_neighbor(self, state):
-        """ Returns the closest node to a given state """
         if not self._nodes:
-            return None  # No nodes in the tree
-        return min(
-        self._nodes,
-        key=lambda node: np.linalg.norm(
-            np.array(node.get_state())[0:2] - np.array(state)[0:2]
-        )**2 + np.linalg.norm(
-            self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
-        )**2
-        )
+            return None
+        query_point = np.array(state[0:2])
+        dist, index = self._kdtree.query(query_point)
+        return self._nodes[index]
 
-    def find_nearest_neighbors(self, state):
-        """ Returns a sorted list of nodes based on proximity to the given state """
+    # def find_nearest_neighbors(self, state):
+    #     """ Returns a sorted list of nodes based on proximity to the given state """
+    #     if not self._nodes:
+    #         return []  # No nodes in the tree
+    #     # return sorted(self._nodes, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
+    #     return sorted(
+    #     self._nodes,
+    #     key=lambda node: np.linalg.norm(
+    #         np.array(node.get_state())[0:2] - np.array(state)[0:2]
+    #     )**2 + np.linalg.norm(
+    #         self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
+    #     )**2
+    #     )
+
+    def find_nearest_neighbors(self, state, k=None, radius=None):
         if not self._nodes:
-            return []  # No nodes in the tree
-        # return sorted(self._nodes, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
-        return sorted(
-        self._nodes,
-        key=lambda node: np.linalg.norm(
-            np.array(node.get_state())[0:2] - np.array(state)[0:2]
-        )**2 + np.linalg.norm(
-            self.scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3])
-        )**2
-        )
+            return []
+        
+        query_point = np.array(state[0:2])
+
+        if k is not None:
+            dists, indices = self._kdtree.query(query_point, k=min(k, len(self._nodes)))
+        elif radius is not None:
+            indices = self._kdtree.query_ball_point(query_point, radius)
+        else:
+            # Default: return all sorted by distance
+            dists, indices = self._kdtree.query(query_point, k=len(self._nodes))
+
+        if isinstance(indices, numbers.Integral):  # Single result case
+            return [self._nodes[indices]]
+        else:
+            return [self._nodes[i] for i in indices]
 
     def visualize_tree(self):
         self.ax.clear()  # Clear previous frame
