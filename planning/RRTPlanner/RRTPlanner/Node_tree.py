@@ -221,7 +221,8 @@ class Tree:
             return path, cost_cumulative
         else:
             return [], np.inf
-        
+
+    
     def set_root(self,root) :
         """disconnect the path upto the root and set the new root"""
         self._root = root

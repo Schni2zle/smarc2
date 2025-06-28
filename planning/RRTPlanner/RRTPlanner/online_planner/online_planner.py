@@ -56,13 +56,14 @@ class RRTPlanner():
         self.wp_count = 0
         # self.timer = self._node.create_timer(0.1, self.online_manager)  # Timer to get obstacles periodically
         # self.timer_battery = self._node.create_timer(0.1, self.battery_manager)  # Timer to get battery periodically
-        # self.timer_eval = self._node.create_timer(0.1, self.eval_manager)  # Timer to get battery periodically
-        self.timer_scenario1 = self._node.create_timer(0.1, self.scenario_manager)  # Timer to get battery periodically
+        self.timer_eval = self._node.create_timer(0.1, self.eval_manager)  # Timer to get battery periodically
+        # self.timer_scenario1 = self._node.create_timer(0.1, self.scenario_manager)  # Timer to get battery periodically
+        # self.timer_reconnect = self._node.create_timer(0.1, self.reconnect_evaluate)  # Timer to reconnect to action server
         self.obstacles_populated = False  # Flag to check if obstacles are populated
         self.goal_sent_flag = False
         self.tree_initialized = False
         self.path = []
-        # should be mapped to tree hmmm
+        # should be mapped to tree hmmmdubins_steer
         self.final_node_list = []
         self.final_node = Tree_Node()
         # self.sam_states = StateInformation(self._node)
@@ -81,6 +82,7 @@ class RRTPlanner():
 
         #rewiring params
         self.verbose = False
+        self.verbose_back = False
         self.rewiring_distance = 60.0  # Rewiring distance
         self.rewiring_limit = 10  # Rewiring limit
         self.rewire_count = 0
@@ -96,8 +98,16 @@ class RRTPlanner():
         self.bounds= ((0, 100),(-50, 50))
         self.start_time_wp = None
 
-        self.optimize_path_back = True
+        self.optimize_path_back = False
         self.SCALE_ARCLENGTH = 0.5
+        self.back_computation_time = 0.0
+        self.iteration_count = 0
+        self.iteration_limit = 50
+        self.rewire_logging_interval = 10
+        self.log_rewire = []
+        self.expanded = False
+        self.full_goal_msg = []
+        self.plot_name = "visualization_plot"
 
         #train the surrogate model
         # self.trainGP()
@@ -177,28 +187,39 @@ class RRTPlanner():
         rewire_count = 0
         self.final_path_back = []
         final_node = None
+        dubins_optimize = False
         # self.sam_states.check_state() # this can provide the start position for the this iteration
         start_time = time.time()
         for iter in range(10000):  # Max iterations 
+            
             # self.sam_states.check_state() 
             # self._node.get_logger().info(f"Iteration: {iter}")
 
             rand_point = self.goal_biased_sampling(passage_bias = passage_bias)  # Sample a random point in the space)
             # self._node.get_logger().info(f"Random point: {rand_point}")
             nearest_node = Tree_Node()
+            # start_time = time.time()
             nearest_node = self.tree.find_nearest_neighbor(rand_point)   # returns node with minimum cost
+            # end_time = time.time()
+            # self._node.get_logger().info(f"Time taken to find nearest neighbor: {end_time - start_time} seconds")
             # nearest neighbors should be a list hmmm
             # path_back = self.find_reverse_path(rand_point, obstacle_check = obstacle_check)
             
             # path_back_exist = len(path_back) > 0
             # self._node.get_logger().info(f"Nearest node: {nearest_node.get_state()} and random point: {rand_point}")
-            new_point, path_exist, cost, param = self.dubins_steer(nearest_node.get_state(), rand_point, free_range = False, obstacle_check = obstacle_check )  # Steer towards the random point
+            if iter> 500:
+                dubins_optimize = True
+            # Steer towards the random point
+            new_point, path_exist, cost, param = self.dubins_steer(nearest_node.get_state(), rand_point, free_range = True, optimize = dubins_optimize, obstacle_check = obstacle_check )  
             path_back = []
             if baseline:
                 # For baseline, we don't check for reverse path
                 path_back_exist = True
             else:
+                # start_time = time.time()
                 path_back = self.find_reverse_path(new_point, optimize=False, obstacle_check = obstacle_check)
+                # end_time = time.time()
+                # self._node.get_logger().info(f"Time taken to find reverse path: {end_time - start_time} seconds")
                 path_back_exist = len(path_back) > 0
             # self._node.get_logger().info(f"cost : {cost}")
             # self._node.get_logger().info(f"path exists : {path_exist} and return_path exists : {path_back_exist} ")
@@ -224,13 +245,21 @@ class RRTPlanner():
                         if path_to_goal and path_back_exist:
                             final_node = Tree_Node(parent = nearest_node,cost = cost,state = final_state, param = param, path_back = path_back_final)
                             self.final_node_list.append(final_node)
+                            self.final_node = final_node
                             self.tree.add_node(final_node)
                             break
+            end_time = time.time()   #UNCOMMENT IF YOU WANT TO STOP INFINITE ONES
+            if end_time - start_time > 10.0:
+                self.path = []
+                return [], False
+            #     self._node.get_logger().info(f"Time taken for iteration {iter}: {end_time - start_time} seconds")
+            # self._node.get_logger().info(f"Time taken for iteration {iter}: {end_time - start_time} seconds")
                     # rewired = self.rewiring(new_node)
                     # rewire_count += 1 if rewired else 0
                     # self._node.get_logger().info(f"Was tree rewired? {rewired}")
         if final_node is None:
             self._node.get_logger().info("Goal not reached within max iterations")
+            self.path = []
             return [], False
         path, cost = self.tree.find_path(final_node)
         # for node in path[1:]:
@@ -240,51 +269,90 @@ class RRTPlanner():
         self._node.get_logger().info(f"Time taken to generate path: {end_time - start_time}")
         self._node.get_logger().info(f"Generated path with {len(path)} waypoints and rewired {rewire_count} times with cost {cost}")
         
-        # #now we send this path to dubins planner to get additional waypoints.
-        # dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path 
-        #         if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
-        # if obstacle_check:
-        #     dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
-        # else:
-        #     dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins)
-        
-        # if not baseline:
-        #     path_back = self.find_reverse_path(final_node.get_state(), optimize = True, obstacle_check = obstacle_check)
-        #     if len(path_back) == 0:
-        #         self._node.get_logger().info(f"PATH BACK NOT FOUND USING OPTIMIZE")
-        #         path_back = self.find_reverse_path(final_node.get_state(), optimize = False, obstacle_check = obstacle_check)
-        #     self._node.get_logger().info(f"path length: {len(path_back)}")
-        #     if len(path_back) == 1:
-        #         self._node.get_logger().info(f"path back: {path_back[0].get_state()}")
-        #     dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
-        #             if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
-        #     if obstacle_check:
-        #         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
-        #     else:
-        #         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+        #now we send this path to dubins planner to get additional waypoints.
+        dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path 
+                if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
+        if obstacle_check:
+            dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+        else:
+            dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins)
         # self._node.get_logger().info(f"the original indices : {original_indices}")
 
-        # self.original_wp_indices = [int(i) for i in original_indices]
-        # self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=False)
+        self.original_wp_indices = [int(i) for i in original_indices]
+        if not baseline:  #UNCOMMENT IF YOU WANT OPTIMIZED PATH
+            start_time = time.time()
+            path_back = self.find_reverse_path(final_node.get_state(), optimize = True, obstacle_check = obstacle_check)
+            path_back = final_node.get_return_path()
+            end_time = time.time()
+            
+            # end_time = time.time()
+            if len(path_back) == 0:
+                self._node.get_logger().info(f"PATH BACK NOT FOUND USING OPTIMIZE")
+                # path_back = self.find_reverse_path(final_node.get_state(), optimize = False, obstacle_check = obstacle_check)
+                self.back_computation_time = 0.0
+            else: 
+                self.back_computation_time = end_time - start_time
+                self.final_node.assign_return_path(path_back)
 
+
+
+            self._node.get_logger().info(f"Return path with {len(path_back)} waypoints in {self.back_computation_time} seconds")
+            final_node.assign_return_path(path_back)
+            self.final_node_list.append(final_node)
+            self.final_node = final_node
+            self._node.get_logger().info(f"path length: {len(path_back)}")
+            if len(path_back) == 1:
+                self._node.get_logger().info(f"path back: {path_back[0].get_state()}")
+            dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
+                    if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
+            if obstacle_check:
+                dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+            else:
+                dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+            old_time = time.time()
+            self.plot_name = f"before_rewiring_{time.time()}"
+            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True, save= True) #VISUALIZATIONS
+        # else:
+        #     self.visualize_tree(np.array(dubins_out_forward),np.array([]), path, visualize_back=False)
         if len(path) == 2:
             #path length being 2 means that the goal is the immediate next waypoint
             final_wp = True
         else : 
             if rewire:
+                self.rewire_count = 0
+                # Rewiring iterations
                 start_time = time.time()
                 rewire_iter = 0
-                while time.time() - start_time < 15:
-                    rewire_iter += 1
+                self.log_rewire = []
+                length = np.linalg.norm(np.array(self.start[0:2]) - np.array(self.goal[0:2]))
+                # while time.time() - start_time < 15:
+                while (rewire_iter < self.iteration_limit):
+                    # rewire_iter += 1
+                    # if rewire_iter % self.rewire_logging_interval == 0:
+                    
+                        
+                        # self.log_rewire.append((rewire_iter, cost/length, arc_length/cost*100, self.rewire_count))
+                    
+                    # self._node.get_logger().info(" rewiring")
                     # self._node.get_logger().info(f"Rewiring iteration: {rewire_iter}")
                     self.informed_rrtstar(eval=False, informed = True ,obstacle_check = obstacle_check, baseline = baseline)
+                    if self.expanded == True:
+                        rewire_iter+= 1
+                        cost, arc_length = self.compute_path_cost(self.path)
+                        self.log_rewire.append((rewire_iter, cost/length, arc_length/cost*100, self.rewire_count))
+                        self._node.get_logger().info(f"Rewiring iteration: {rewire_iter} and rewire count: {self.rewire_count}")
+                        self.expanded = False
+                    # self._node.get_logger().info(f"Rewiring iteration: {rewire_iter}")
                 self._node.get_logger().info(f"Time taken to generate path: {time.time() - start_time}")
-                
+                self.iteration_count = rewire_iter if rewire else 0
+                self._node.get_logger().info(f"Total rewiring iterations: {rewire_iter}")
+
                 self.assign_shortest_path()
                 self._node.get_logger().info(f"Generated path with {len(self.path)} waypoints and rewired {self.rewire_count} times")
             # for node in self.tree.get_nodes():
                 # self._node.get_logger().info(f"cost : {node.get_cost()}")
         path = self.path
+        
         # for node in path[1:]:
         #     self._node.get_logger().info(f"param: {node.get_param().seg_final} and state: {node.get_state()[3]}")
         # computed_cost, arc_length = self.compute_path_cost(path)
@@ -301,22 +369,24 @@ class RRTPlanner():
         if len(path) == 2:
             #path length being 2 means that the goal is the immediate next waypoint
             final_wp = True
-        # if not baseline:
+        if not baseline:
+            path_back = final_node.get_return_path()
         #     path_back = self.find_reverse_path(self.final_node.get_state(), optimize = True, obstacle_check= obstacle_check)
         #     if len(path_back) == 0:
         #         self._node.get_logger().info(f"PATH BACK NOT FOUND USING OPTIMIZE")
         #         path_back = self.find_reverse_path(final_node.get_state(), optimize = False, obstacle_check = obstacle_check)
         #     self._node.get_logger().info(f"path length: {len(path_back)}")
-        #     dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
-        #             if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
-        #     if obstacle_check:
-        #         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
-        #     else:
-        #         dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
-        #     self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True)
+            dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_back
+                    if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
+            if obstacle_check:
+                dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+            else:
+                dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+                self.plot_name = f"after_rewiring_{old_time}"
+            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True, save=True) #VISUALIZATIONS
         # else:
         #     self.visualize_tree(np.array(dubins_out_forward),np.array([]), path, visualize_back=False)
-        # self._node.get_logger().info(f"the original indices : {original_indices}")
+        self._node.get_logger().info(f"the original indices : {original_indices}")
         
         # give waypoints till the first original index to fawllow
         # dubins_first_waypoint = dubins_out_forward[0:self.original_wp_indices[1]+1]
@@ -327,10 +397,10 @@ class RRTPlanner():
                 break
         
         dubins_first_waypoint = dubins_out_forward[wp_index:self.original_wp_indices[1]+1]
-
+        self.full_goal_msg = dubins_out_forward
         # self._node.get_logger().info(f"first waypoint : {dubins_first_waypoint[0]}")
         goal_msg = self.send_waypoints(dubins_first_waypoint, path)
-
+        # print(self.path)
         return goal_msg, final_wp
 
     def informed_rrtstar(self, tree =None, eval = True, informed = True, obstacle_check = False, baseline = False):
@@ -341,23 +411,26 @@ class RRTPlanner():
         final_node =  tree.find_nearest_neighbor(self.goal)
         #maybe it shouldn't search this every call
         if informed:
-            furthest_node, max_distance = max(
-            ((node, 
-            np.linalg.norm(np.array(node.get_state())[0:2] - np.array(start_node.get_state())[0:2]) +
-            np.linalg.norm(np.array(node.get_state())[0:2] - np.array(final_node.get_state())[0:2]))
-            for node in self.path),
-            key=lambda x: x[1])
-            
-            #HYPERPARAMETER FOR UNCERTAINTY
-            # LAMBDA = 0.1
-            if eval:
-                path_uncertainty = self.compute_path_uncertainty(self.path)
-                c_best = max_distance + self.LAMBDA * path_uncertainty
-            else:
-                c_best = max_distance
+            if random.random() < 0.9:
+                furthest_node, max_distance = max(
+                ((node, 
+                np.linalg.norm(np.array(node.get_state())[0:2] - np.array(start_node.get_state())[0:2]) +
+                np.linalg.norm(np.array(node.get_state())[0:2] - np.array(final_node.get_state())[0:2]))
+                for node in self.path),
+                key=lambda x: x[1])
+                
+                #HYPERPARAMETER FOR UNCERTAINTY
+                # LAMBDA = 0.1
+                if eval:
+                    path_uncertainty = self.compute_path_uncertainty(self.path)
+                    c_best = max_distance + self.LAMBDA * path_uncertainty
+                else:
+                    c_best = max_distance
 
-            #now we rewire the tree
-            rand_point = self.informative_sampling(start_node.get_state(), final_node.get_state(), cmax = max_distance)
+                #now we rewire the tree
+                rand_point = self.informative_sampling(start_node.get_state(), final_node.get_state(), cmax = max_distance)
+            else: 
+                rand_point = self.goal_biased_sampling()
         else:
             rand_point = self.goal_biased_sampling()
 
@@ -367,7 +440,7 @@ class RRTPlanner():
         
         # path_back_exist = True
         # self._node.get_logger().info(f"Nearest node: {nearest_node.get_state()} and random point: {rand_point}")
-        new_point, path_exist, cost, param = self.dubins_steer(nearest_node.get_state(), rand_point, optimize=self.optimize_path_back, free_range =False, obstacle_check = obstacle_check)  # Steer towards the random point
+        new_point, path_exist, cost, param = self.dubins_steer(nearest_node.get_state(), rand_point, optimize=True, free_range =False, obstacle_check = obstacle_check, sparse = True)  # Steer towards the random point
         path_back = []
         if not baseline:
             path_back = self.find_reverse_path(new_point, tree,optimize=False, obstacle_check = obstacle_check)
@@ -381,6 +454,7 @@ class RRTPlanner():
             if path_exist and path_back_exist: # If path exists, add the new node to the tree
                 new_node = Tree_Node(parent = nearest_node, cost=cost, state = new_point, param = param, path_back = path_back)
                 tree.add_node(new_node)
+                self.expanded = True
                 distance_to_goal = np.linalg.norm(np.array(new_point)[0:2] - np.array(self.goal)[0:2])
                 # self._node.get_logger().info(f"Distance to goal: {distance_to_goal}")
                 if  distance_to_goal < self.goal_tolerance:
@@ -407,12 +481,18 @@ class RRTPlanner():
                     #     self.final_node_list.append(final_node)
                     #     self.assign_shortest_path(tree)
                 random_node = tree.get_nodes()[random.randint(0, len(tree.get_nodes())-1)]
-                rewire_node = new_node if random.random() < 0.8 else random_node
-                rewired = self.rewiring(new_node, eval=eval, obstacle_check = obstacle_check, baseline = baseline)
+                if random.random() < 0.8:
+                    rewire_node, existing_node = new_node, False
+                else:
+                    rewire_node, existing_node = random_node, True
+                # self._node.get_logger().info(f"Rewiring tree with node {rewire_node.get_state()} and existing node {existing_node}")
+                rewired = self.rewiring(rewire_node,existing_node=existing_node, eval=eval, obstacle_check = obstacle_check, optimize_heading = True, baseline = baseline)
                 self.rewire_count += 1 if rewired else 0
                 self.assign_shortest_path()
                 # rewire_count += 1 if rewired else 0
                 # self._node.get_logger().info(f"Was tree rewired? {rewired}")
+        # else:
+        #     self._node.get_logger().info(f"Not steerable")
 
     def assign_shortest_path(self, tree = None):
         """ Assign the shortest path to the tree. Only called if there is a change in the final node list """
@@ -431,9 +511,9 @@ class RRTPlanner():
                 self.path = path
                 self.final_node = final_node_candidate
         # if self.verbose:
-        self._node.get_logger().info(f"best cost: {min_cost}")
+        # self._node.get_logger().info(f"best cost: {min_cost}")
     
-    def dubins_steer(self, start, end, free_range = True, optimize = False, obstacle_check = False):
+    def dubins_steer(self, start, end, free_range = True, optimize = False, obstacle_check = False, sparse = False):
         """ Move from start towards end by step_size """
         # self._node.get_logger().info(f"start: {start} end : {end}")
         direction = np.array(end) - np.array(start)
@@ -449,27 +529,29 @@ class RRTPlanner():
             new_point = np.concatenate((min(norm,self.stepsize)* direction / norm, end[2:]))  + np.array(start)
 
         
-        # self._node.get_logger().info(f"projection on the steerable space: {new_point}")
-        center1 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 + np.pi/2), np.sin(start[3]*np.pi/180 + np.pi/2)]) * self.turning_radius
-        center2 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 - np.pi/2), np.sin(start[3]*np.pi/180 - np.pi/2)]) * self.turning_radius
-        # is_front = np.dot(direction, np.array([np.cos(start[3]), np.sin(start[3])])) > 0 
-        left_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center2)) < self.turning_radius
-        right_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center1)) < self.turning_radius
-        # self._node.get_logger().info(f"left valid: {left_invalid} right valid: {right_invalid} is front: {is_front}")
-        if left_invalid or right_invalid : 
-            # self._node.get_logger().info(f"not in steerable region: {new_point}")
-            return start, False, np.inf, None
-        else: 
-            #now we check for collisions and the shortest path for a range of headings
-            path_exist,best_heading, cost, best_param = self.is_path_collision_free(start,new_point, optimize_heading = optimize, obstacle_check = obstacle_check)
-            new_point = (new_point[0], new_point[1], new_point[2], best_heading)
-            # self._node.get_logger().info(f"returning new point: {new_point}")
-            return new_point, path_exist, cost, best_param
+        # # self._node.get_logger().info(f"projection on the steerable space: {new_point}")
+        # center1 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 + np.pi/2), np.sin(start[3]*np.pi/180 + np.pi/2)]) * self.turning_radius
+        # center2 = start[0:2] + np.array([np.cos(start[3]*np.pi/180 - np.pi/2), np.sin(start[3]*np.pi/180 - np.pi/2)]) * self.turning_radius
+        # # is_front = np.dot(direction, np.array([np.cos(start[3]), np.sin(start[3])])) > 0 
+        # left_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center2)) < self.turning_radius
+        # right_invalid = np.linalg.norm(np.array(new_point)[0:2] - np.array(center1)) < self.turning_radius
+        # # self._node.get_logger().info(f"left valid: {left_invalid} right valid: {right_invalid} is front: {is_front}")
+        # if left_invalid or right_invalid : 
+        #     # self._node.get_logger().info(f"not in steerable region: {new_point}")
+        #     return start, False, np.inf, None
+        # else: 
+        #now we check for collisions and the shortest path for a range of headings
+        path_exist,best_heading, cost, best_param = self.is_path_collision_free(start,new_point, optimize_heading = optimize, obstacle_check = obstacle_check, sparse = sparse)
+        new_point = (new_point[0], new_point[1], new_point[2], best_heading)
+        # self._node.get_logger().info(f"returning new point: {new_point}")
+        return new_point, path_exist, cost, best_param
 
-    def is_path_collision_free(self, start, end, optimize_heading = True, obstacle_check = False):
+    def is_path_collision_free(self, start, end, optimize_heading = True, obstacle_check = False, sparse = True):
         base_heading = end[3]
         # base_heading = start[3]
         step_heading = 180
+        if sparse: 
+            step_heading = 6
         if optimize_heading:
             headings =  base_heading + np.linspace(-180, 180, step_heading, endpoint = True) 
         else:
@@ -516,28 +598,34 @@ class RRTPlanner():
 
         return path_exist, best_heading, min_cost, best_param
     
-    def rewiring(self, new_node, tree = None, existing_node = False, eval = True, obstacle_check = False, baseline = False):
+    def rewiring(self, new_node, tree = None, existing_node = False, optimize_heading = False , eval = True, obstacle_check = False, baseline = False):
         """ Rewire the tree to reduce cost """
         if tree is None:
             tree = self.tree
         rewired = False
         # rewiring_distance = self.rewiring_distance
-        rewiring_distance = self.stepsize*2
+        rewiring_distance = self.stepsize*5
         gamma = 2.0
         n_nodes = len(tree.get_nodes())
         d = 2 #dimensions
         rewiring_distance = rewiring_distance* gamma * (np.log(n_nodes) / n_nodes) ** (1 / d)
         # self._node.get_logger().info(f"Rewiring distance: {rewiring_distance}")
         node_list = tree.find_nearest_neighbors(new_node.get_state(), k=self.rewiring_limit, radius=rewiring_distance)
+        # len(node_list)
+        # self._node.get_logger().info(f"Number of nodes in the tree: {len(node_list)}")
         for iter,node in enumerate(node_list) :
             if iter == self.rewiring_limit:
                 break
             valid_node = node != new_node 
             # and node != tree.get_root()
             distance = np.linalg.norm(np.array(new_node.get_state())[0:2] - np.array(node.get_state())[0:2])
-            if valid_node :
+            if valid_node: 
                 # and distance < rewiring_distance:
-                path_exist,best_heading,new_cost_segment, param = self.is_path_collision_free(node.get_state(), new_node.get_state(), obstacle_check= obstacle_check)  
+                if existing_node:
+                    path_exist,best_heading,new_cost_segment, param = self.is_path_collision_free(node.get_state(), new_node.get_state(),optimize_heading=False, obstacle_check= obstacle_check)  
+                else:
+                    path_exist,best_heading,new_cost_segment, param = self.is_path_collision_free(node.get_state(), new_node.get_state(),optimize_heading=optimize_heading , obstacle_check= obstacle_check)  
+
                 new_state = new_node.get_state()
                 new_state = (new_state[0],new_state[1],new_state[2],best_heading)
                 new_node.assign_state(new_state)
@@ -688,7 +776,7 @@ class RRTPlanner():
     def goal_biased_sampling(self, passage_bias = False):
         """ Biased sampling towards the goal """
         sample = random.uniform(0, 1)
-        if sample < 0.0001:
+        if sample < 0.001:
             return self.goal
         if passage_bias :
           if sample > 0.0001 and sample < 0.1 : 
@@ -749,88 +837,130 @@ class RRTPlanner():
         state = (state[0], state[1], state[2], state[3])
         self._node.get_logger().info(f"current state:{state}")
         final_wp = False
-        nearest_node_list = sorted(self.path, key=lambda node: np.linalg.norm(np.array(node.get_state())[0:2] - np.array(state)[0:2]))
-        self._node.get_logger().info(f"nearest node list length:{len(nearest_node_list)}")
+        # scale_yaw = 0.1
+        # nearest_node_list = sorted(self.path, key=lambda node: np.linalg.norm((np.array(node.get_state())[0:2] - np.array(state)[0:2])**2 + (scale_yaw*(np.array(node.get_state())[2:3] - np.array(state)[2:3]))**2))
+    #     )**2)
+        nearest_node_list = sorted(self.path, key=lambda node: np.linalg.norm((np.array(node.get_state())[0:2] - np.array(state)[0:2])))
+        
+        self._node.get_logger().info(f"nearest node list length:{len(nearest_node_list)} and nearest neighbor: {nearest_node_list[0].get_state()}")
         curr_wp = -1
         nearest_node = Tree_Node()
         path_exists = False
-        for curr_wp,nearest_node_temp in enumerate(nearest_node_list) : 
-            if curr_wp <= self.wp_count : 
-                    path_exists = False
-                    continue
-            else :
+        
+        # for curr_wp,nearest_node_temp in enumerate(nearest_node_list) : 
+        #     if curr_wp <= self.wp_count : 
+        #             path_exists = False
+        #             continue
+        #     else :
+        #         # Step 2: Try a direct Dubins connection to the nearest node
+        #         path_exists,_,_,_ = self.is_path_collision_free(state, nearest_node_temp.get_state(), optimize_heading=False, obstacle_check= obstacle_check)
+        #     if path_exists:
+        #         self.wp_count = curr_wp
+        #         nearest_node = nearest_node_temp
+        #         break
+        self.wp_count = self.path.index(nearest_node_list[0])
+        for nearest_node_temp in nearest_node_list:
+            path_index = self.path.index(nearest_node_temp)  # Find actual index in self.path
+            optimize_heading = False
+            if path_index <= self.wp_count:
+                path_exists = False
+                continue
+            else:
                 # Step 2: Try a direct Dubins connection to the nearest node
-                path_exists,_,_,_ = self.is_path_collision_free(state, nearest_node_temp.get_state(), optimize_heading=False, obstacle_check= obstacle_check)
+                if nearest_node_temp == self.final_node:
+                    self._node.get_logger().info(f"reconnecting to final node")
+                    optimize_heading = True
+                path_exists, _, _, _ = self.is_path_collision_free(
+                    state, nearest_node_temp.get_state(), optimize_heading=optimize_heading, obstacle_check=obstacle_check
+                )
             if path_exists:
-                self.wp_count = curr_wp
+                self.wp_count = path_index
                 nearest_node = nearest_node_temp
-                break
+                # break
 
-        if path_exists:
-            self._node.get_logger().info("path to tree exists")
-            self._node.get_logger().info(f"nearest node is : {nearest_node.get_state()}")
-            self._node.get_logger().info(f"current state is : {state}")
-            #forward tree upto the nearest node
-            #testing forward tree
-            self._node.get_logger().info(f"nearest neighbor children are : {len(nearest_node.get_children())}")
-            forward_tree = copy_tree(nearest_node)
-            # Direct connection is possible; create a new root node
-            new_root = Tree_Node(state=state, parent=None)
-            old_root = forward_tree.get_root()
-            old_root.assign_parent(new_root)
-            # Update the tree structure
-            forward_tree.add_node(new_root)
-            forward_tree.set_root(new_root)
-            # final_node = self.path[-1]
-            final_node = self.final_node
-            
-            for node in forward_tree.get_nodes():
-                if node.get_state()[0:2] == final_node.get_state()[0:2]:
-                    final_tree_node = node
-                    break
-            # final_tree_node = forward_tree.find_nearest_neighbor(final_node.get_state())
-            self._node.get_logger().info(f"final node is : {final_tree_node.get_state()}")
-            path_forward ,cost= forward_tree.find_path(final_tree_node)
+        # if path_exists:
+                self._node.get_logger().info("path to tree exists")
+                self._node.get_logger().info(f"nearest node is : {nearest_node.get_state()}")
+                self._node.get_logger().info(f"current state is : {state}")
+                #forward tree upto the nearest node
+                #testing forward tree
+                # self._node.get_logger().info(f"nearest neighbor children are : {len(nearest_node.get_children())}")
+                forward_tree = copy_tree(nearest_node)
+                # Direct connection is possible; create a new root node
+                new_root = Tree_Node(state=state, parent=None)
+                old_root = forward_tree.get_root()
+                old_root.assign_parent(new_root)
+                # Update the tree structure
+                forward_tree.add_node(new_root)
+                forward_tree.set_root(new_root)
+                # final_node = self.path[-1]
+                final_node = self.final_node
+                
+                for node in forward_tree.get_nodes():
+                    if node.get_state()[0:2] == final_node.get_state()[0:2]:
+                        final_tree_node = node
+                        break
+                # final_tree_node = forward_tree.find_nearest_neighbor(final_node.get_state())
+                self._node.get_logger().info(f"final node is : {final_tree_node.get_state()}")
+                path_forward ,cost= forward_tree.find_path(final_tree_node)
 
-            if len(path_forward) == 2:
-                #path length being 2 means that the goal is the immediate next waypoint
-                final_wp = True
-            dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_forward 
-                    if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
-            dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
-            self.original_wp_indices = [int(i) for i in original_indices]
-            #backward path
-            backward_tree = copy_tree(self.path[0], final_node = self.path[curr_wp-2])
-            path_backward = self.find_reverse_path(state, tree = backward_tree, optimize=True, obstacle_check = obstacle_check)
-            self._node.get_logger().info(f"path length: {len(path_backward)}")
-            dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_backward
-                if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
-            dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
-            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path = path_forward, tree = forward_tree)
-            # self._node.get_logger().info(f"the original indices : {original_indices}")
-            # convert back to pose2D for transfer
-            self.original_wp_indices = [int(i) for i in original_indices]
-            # give waypoints till the first original index to fawllow
+                if len(path_forward) == 2:
+                    #path length being 2 means that the goal is the immediate next waypoint
+                    final_wp = True
+                dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_forward 
+                        if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
+                if obstacle_check:
+                    dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+                else:
+                    dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins)
+                if dubins_out_forward == []:
+                    self._node.get_logger().info("Obstacle in the way, no forward path found")
+                    continue
+                self.original_wp_indices = [int(i) for i in original_indices]
+                #backward path
+                # backward_tree = copy_tree(self.path[0], final_node = self.path[curr_wp-2])
+                path_backward = self.find_reverse_path(state, tree = None, optimize=False, obstacle_check = obstacle_check)
+                # path_backward = self.find_reverse_path(state, tree = backward_tree, optimize=False, obstacle_check = obstacle_check)
 
-            for wp_index,wp in enumerate(dubins_out_forward):
-                #here we use the goal tolerance from the action client
-                if np.linalg.norm(np.array(wp[0:2]) - np.array(state[0:2])) > 7.0:
-                    # self._node.get_logger().info(f"found start waypoint {wp}")
-                    break
-            # dubins_first_waypoint = dubins_out_forward[0:self.original_wp_indices[1]+1]
-            dubins_first_waypoint = dubins_out_forward[wp_index:self.original_wp_indices[1]+1]
+                self._node.get_logger().info(f"path length: {len(path_backward)}")
+                if len(path_backward) == 0:
+                    self._node.get_logger().info("No backward path found")
+                    return [], final_wp
+                dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_backward
+                    if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
+                if obstacle_check:
+                    dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+                    # self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path = path_forward, tree = forward_tree, save = True)
+                else:
+                    dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+                    # self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path = path_forward, tree = forward_tree, save = True)
+                
+                # self._node.get_logger().info(f"the original indices : {original_indices}")
+                # convert back to pose2D for transfer
+                self.original_wp_indices = [int(i) for i in original_indices]
+                # give waypoints till the first original index to fawllow
 
-            goal_msg = self.send_waypoints(dubins_first_waypoint, path_forward)
-            self._node.get_logger().info(f"first waypoint : {dubins_first_waypoint[0]}")
-            self._node.get_logger().info(f"distance from start to first waypoint : {np.linalg.norm(np.array(dubins_first_waypoint[0][0:2]) - np.array(state[0:2]))}")
-            # self._node.get_logger().info(f"current final wp : {self._ac.waypoint_queue[-1]}")
-            
-            return goal_msg, final_wp
-            # return True  # Successfully reconnected 
-        else: 
-            self._node.get_logger().info("Path from current position to the nearest node doesn't exist")
-            #what do i give back here 
-            return [], final_wp
+                for wp_index,wp in enumerate(dubins_out_forward):
+                    #here we use the goal tolerance from the action client
+                    if np.linalg.norm(np.array(wp[0:2]) - np.array(state[0:2])) > 7.0:
+                        # self._node.get_logger().info(f"found start waypoint {wp}")
+                        break
+                # dubins_first_waypoint = dubins_out_forward[0:self.original_wp_indices[1]+1]
+                dubins_first_waypoint = dubins_out_forward[wp_index:self.original_wp_indices[1]+1]
+                if dubins_first_waypoint == []:
+                    self._node.get_logger().info("No first waypoint found")
+                    return [], final_wp
+                goal_msg = self.send_waypoints(dubins_first_waypoint, path_forward)
+                self._node.get_logger().info(f"first waypoint : {dubins_first_waypoint[0]}")
+                self._node.get_logger().info(f"distance from start to first waypoint : {np.linalg.norm(np.array(dubins_first_waypoint[0][0:2]) - np.array(state[0:2]))}")
+                # self._node.get_logger().info(f"current final wp : {self._ac.waypoint_queue[-1]}")
+                
+                return goal_msg, final_wp
+                # return True  # Successfully reconnected 
+            else: 
+                self._node.get_logger().info("Path from current position to the nearest node doesn't exist")
+                #what do i give back here 
+                return [], final_wp
 
         
         # # Step 3: try finding a reverse path\
@@ -876,7 +1006,10 @@ class RRTPlanner():
         
         # if optimize:
         #     self._node.get_logger().info(f"Optimizing reverse path. state : {state} ")
-        nearest_node_list = tree.find_nearest_neighbors(state) #THIS IS A GOOD BACKUP THO
+        # start_time = time.time()  
+        nearest_node_list = tree.find_nearest_neighbors(state, k = 10, radius=20.0) #THIS IS A GOOD BACKUP THO
+        # end_time = time.time()
+        # self._node.get_logger().info(f"Time taken to find nearest neighbor: {end_time - start_time} seconds")
         # if len(nearest_node_list) == 0:
         #     nearest_node_list = tree.find_nearest_neighbors(state)
         #     alt_path = True
@@ -884,8 +1017,9 @@ class RRTPlanner():
             nearest_node_list = nearest_node_list[0:10]
         # self._node.get_logger().info(f"length of nearest neighbors: {len(nearest_node_list)}")
         reverse_path_dict = {} 
+        iter = 0
         for nearest_node in nearest_node_list:
-            
+            iter+=1
             reverse_path = []
             total_cost = 0
 
@@ -907,9 +1041,13 @@ class RRTPlanner():
             nearest_node_reverse_state = nearest_node_state[0], nearest_node_state[1], nearest_node_state[2], nearest_node_state[3] + 180
             first_point,first_path_exist, first_cost, param = self.dubins_steer(state, nearest_node_reverse_state, free_range = True, optimize=optimize_heading, obstacle_check = obstacle_check)  # Steer towards the parent
             total_cost+= first_cost
+            if self.verbose_back:
+                self._node.get_logger().info(f"neighbor {iter} first point: {first_point} and nearest neighbor: {nearest_node_reverse_state}")
             # new_parent = Tree_Node(state=state, parent=None)
             #right now it gives the first found path, for speeding up forward computation, but we can optimize when we actually try to return?
             if not first_path_exist:
+                if self.verbose_back:
+                    self._node.get_logger().info(f"neighbor {iter} can't be reconnected to")
                 continue
             
             first_node = Tree_Node(state = state, parent = None)
@@ -930,12 +1068,14 @@ class RRTPlanner():
                 reversed_state = (p.get_state()[0], p.get_state()[1], p.get_state()[2], p.get_state()[3] + 180)
                 parent_state = new_parent.get_state()
                 #THIS IS *probably* TRIVIAL, IT IS TRAVERSIBLE THAT'S WHY IT EXISTS IN THE TREE AT ALL
-                new_point, path_exist, seg_cost, param = self.dubins_steer(parent_state, reversed_state, optimize = optimize_heading, obstacle_check = obstacle_check)  # Steer towards the parent
-                
+                new_point, path_exist, seg_cost, param = self.dubins_steer(parent_state, reversed_state, optimize = optimize_heading, obstacle_check = obstacle_check, sparse = True)  # Steer towards the parent
+                # _,forward_exist,_,_ = self.dubins_steer(p.get_state(), new_point, optimize = optimize_heading, obstacle_check = obstacle_check, sparse = True)  # Steer towards the parent
                 if not path_exist:
                     # if optimize:
                     #     self._node.get_logger().info(f"States {parent_state} and {reversed_state}")
                     #     self._node.get_logger().info(f"segment {i} is not steerable")
+                    if self.verbose_back:
+                        self._node.get_logger().info(f"neighbor {iter} has segment {i} not steerable")
                     reverse_path.clear()
                     break
                 # if optimize:
@@ -1119,7 +1259,7 @@ class RRTPlanner():
 
         return list_waypoints
         
-    def visualize_tree(self, waypoint_array_forward, waypoint_array_backward, path, tree = None, visualize_back = True, xx =None, yy = None, pred_mean = None, pred_std = None):
+    def visualize_tree(self, waypoint_array_forward, waypoint_array_backward, path, tree = None, visualize_back = True, xx =None, yy = None, pred_mean = None, pred_std = None, save = False):
 
         """ Plot the waypoints and obstacles """
         plt.figure(figsize=(8, 8))
@@ -1148,22 +1288,24 @@ class RRTPlanner():
             plt.gca().add_patch(obstacle_circle)
             plt.scatter(ox, oy, color='k', marker='x', label="Obstacle" if 'Obstacle' not in plt.gca().get_legend_handles_labels()[1] else "")
         
-        for node in tree.get_nodes():
-            if node.get_parent() is not None: 
-            #and node not in path:
-                parent = node.get_parent()
-                node_state = node.get_state()
-                parent_state = parent.get_state()
-                node_wp = Waypoint(node_state[0], node_state[1], node_state[3])
-                parent_wp = Waypoint(parent_state[0], parent_state[1], parent_state[3])
-                path = [(parent_wp.x,parent_wp.y,parent_wp.psi)]
-                path_append = sample_between_wps(parent_wp, node_wp, self.turning_radius, 1.0, self.obstacles, self.obstacle_tree)
-                path.extend(path_append)
-                path.append((node_wp.x,node_wp.y,node_wp.psi))
-                edge_array = np.array(path)
-                edge_x, edge_y = edge_array[:, 0], edge_array[:, 1]
-                plt.plot(edge_x, edge_y, marker=',', linestyle=':', color='c')
-                plt.scatter(node_wp.x, node_wp.y, color='g', marker='x')
+        # for node in tree.get_nodes():
+        #     if node.get_parent() is not None: 
+        #     #and node not in path:
+        #         parent = node.get_parent()
+        #         node_state = node.get_state()
+        #         parent_state = parent.get_state()
+        #         node_wp = Waypoint(node_state[0], node_state[1], node_state[3])
+        #         parent_wp = Waypoint(parent_state[0], parent_state[1], parent_state[3])
+        #         path = [(parent_wp.x,parent_wp.y,parent_wp.psi)]
+        #         # path_append = sample_between_wps(parent_wp, node_wp, self.turning_radius, 1.0, self.obstacles, self.obstacle_tree)
+        #         path_append = sample_between_wps(parent_wp, node_wp, self.turning_radius, 1.0)
+                
+        #         path.extend(path_append)
+        #         path.append((node_wp.x,node_wp.y,node_wp.psi))
+        #         edge_array = np.array(path)
+        #         edge_x, edge_y = edge_array[:, 0], edge_array[:, 1]
+        #         plt.plot(edge_x, edge_y, marker=',', linestyle=':', color='c')
+        #         plt.scatter(node_wp.x, node_wp.y, color='g', marker='x')
 
                 # plt.plot([node.get_state()[0], parent.get_state()[0]], [node.get_state()[1], parent.get_state()[1]], color='g', linestyle='-', linewidth=0.5)
         # Start and Goal positions
@@ -1172,9 +1314,9 @@ class RRTPlanner():
         # Plot start and goal
         root = tree.get_root()
         root_state = root.get_state()
-        plt.scatter(root_state[0],root_state[1], color='hotpink', marker='s', s=150, label="Root")
-        plt.scatter(start_x, start_y, color='g', marker='s', s=150, label="Start")  # Green Square
-        plt.scatter(goal_x, goal_y, color='y', marker='*', s=200, label="Goal")  # Yellow Star
+        plt.scatter(root_state[0],root_state[1], color='hotpink', marker='s', s=150, label="Root") 
+        plt.scatter(start_x, start_y, color='g', marker='s', s=150, label="Start")  # Green Square 
+        plt.scatter(goal_x, goal_y, color='y', marker='*', s=200, label="Goal")  # Yellow Star 
 
         # std_plot = plt.contourf(xx.numpy(), yy.numpy(), pred_std.numpy(), levels=20, cmap="magma")
         # # axs[2].set_title("GP Predictive Stddev (Uncertainty)")
@@ -1194,7 +1336,11 @@ class RRTPlanner():
         plt.legend()
         plt.grid()
         plt.axis("equal")  # Ensures equal scaling for X and Y
-        plt.show()
+        # plt.show()
+
+        if save == True: 
+            plt.savefig(f"{self.plot_name}.png")
+            self._node.get_logger().info(f"Tree visualization saved as {self.plot_name}.png") 
 
     def trainGP(self):
         """train the surrogate model of the GP"""
@@ -1223,26 +1369,41 @@ class RRTPlanner():
                 self._node.get_logger().info(f"Initial pose: {self.start}")
                 start = self.start
                 metrics = []
+                all_trials_data = [] 
+                # self.iteration_limits = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+                # iter_length = len(self.iteration_limits)
                 #evaluate length and comp time for a range of goals
-                n_trials = 50
+                n_trials = 100
+                self.iteration_limit = 2000
+                # print(int(n_trials/len(self.iteration_limits)))
                 for trial in range(n_trials):
                     # self._node.get_logger().info("Train GP Model")
                     #train
                     # self.trainGP()
+                    # quot =  int(n_trials/iter_length) 
+                    # print(quot)
+                    # if trial % quot == 0:
+                    
+                        # self.iteration_limit = self.iteration_limits.pop(0)
                     self._node.get_logger().info(f"Trial {trial + 1}/{n_trials}")
                     self.initialize_tree(self.start)
                     #maybe RRT here
                     # self._node.get_logger().info("Running RRT")
                     #first wp
                     # self._node.get_logger().info("Sending Goal")
-                    goal = (random.uniform(0, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180))
+                    goal = (random.uniform(50, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180))
                     self.goal = goal
                     start_time  = time.time()
                     self.goal_msg, final_waypoint_bool = self.run_rrt(start,goal)
                     end_time = time.time()
+                    if len(self.path) <2:
+                        self._node.get_logger().info("Final waypoint reached")
+                        continue
+                    all_trials_data.append(self.log_rewire)
                     path_length, arc_length = self.compute_path_cost(self.path)
                     curvature_percentage = arc_length/path_length*100
                     compute_time = end_time - start_time
+                    self._node.get_logger().info(f"Euclidean Distance: {np.linalg.norm(np.array(self.start[0:2]) - np.array(self.goal[0:2]))}")
                     if info:
                         info_cost = self.compute_path_uncertainty(self.path)
                     nodes_sampled = len(self.tree.get_nodes())
@@ -1253,6 +1414,7 @@ class RRTPlanner():
                             "euclidean": euclidean,
                             "optimality": path_length / euclidean,
                             "computation_time": compute_time,
+                            "iterations": self.iteration_count,
                             "nodes_sampled": nodes_sampled,
                             "info_cost": info_cost,
                             "curvature" : curvature_percentage
@@ -1263,10 +1425,48 @@ class RRTPlanner():
                             "euclidean": euclidean,
                             "optimality": path_length / euclidean,
                             "computation_time": compute_time,
+                            "iterations": self.iteration_count,
                             "nodes_sampled": nodes_sampled,
                             "curvature" : curvature_percentage
                         })
                 #write to a csv file
+
+                # Flatten to one big list of dicts for all trials
+                flat_logs = []
+                for trial_idx, trial_data in enumerate(all_trials_data):
+                    for (iter_, cost, arc, count) in trial_data:
+                        flat_logs.append({
+                            'trial': trial_idx,
+                            'iteration': iter_,
+                            'cost': cost,
+                            'arc_length': arc,
+                            'rewire_count': count
+                        })
+
+
+                df = pd.DataFrame(flat_logs)
+                df.to_csv("rewire_log.csv", index=False)
+
+                # agg = df.groupby('iteration').agg({
+                #     'cost': ['mean', 'std'],
+                #     'arc_length': ['mean', 'std'],
+                #     'rewire_count': ['mean', 'std']
+                # }).reset_index()
+                # agg.columns = ['iteration', 'cost_mean', 'cost_std', 
+                #             'arc_length_mean', 'arc_length_std',
+                #             'rewire_count_mean', 'rewire_count_std']
+
+                # plt.figure(figsize=(10, 6))
+                # plt.errorbar(agg['iteration'], agg['cost_mean'], yerr=agg['cost_std'], label='Optimality vs Rewiring and Expansion Iterations')
+                # # plt.errorbar(agg['iteration'], agg['arc_length_mean'], yerr=agg['arc_length_std'], label='Arc Length')
+                # plt.xlabel("Rewiring Iteration")
+                # plt.ylabel("Metric Value")
+                # plt.title("Performance Over Rewiring Iterations")
+                # plt.legend()
+                # plt.grid(True)
+                # plt.tight_layout()
+                # plt.show()
+
                 metrics_df = pd.DataFrame(metrics)
                 metrics_df.to_csv("metrics.csv", index=False)
                 self._node.get_logger().info("Metrics saved to metrics.csv")
@@ -1476,12 +1676,19 @@ class RRTPlanner():
                 metrics_baseline= []
                 metrics_safe = []
                 #evaluate length and comp time for a range of goals
-                n_trials = 500
+                n_trials = 2
                 for trial in range(n_trials):
                     # self._node.get_logger().info("Train GP Model")
                     #train
                     # self.trainGP()
-                    self._node.get_logger().info(f"Trial {trial + 1}/{n_trials}")
+                    # self._node.get_logger().info(f"Trial {trial + 1}/{n_trials}")
+                    # if trial % 2 == 1:
+                    #     baseline = False
+                    #     self._node.get_logger().info("Running Safe Planning Scenario")
+                    # else: 
+                    #     baseline = True
+                    #     self._node.get_logger().info("Running Baseline Scenario")
+                   
                     self.initialize_tree(self.start)
 
                     if baseline:
@@ -1503,12 +1710,12 @@ class RRTPlanner():
                     
                     # self.goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=True)
                     
-                    self.goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=True,baseline=baseline, passage_bias = passage_bias, rewire = False)
+                    self.goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=True,baseline=baseline, passage_bias = passage_bias, rewire = True)
                     end_time = time.time()
                     compute_time = end_time - start_time
                     # path_length, arc_length = self.compute_path_cost(self.path)
                     # curvature_percentage = arc_length/path_length*100
-                    if len(self.path) == 2:
+                    if len(self.path) <3:
                         self._node.get_logger().info("Final waypoint reached")
                         continue
                     retreat_index = random.randint(1, len(self.path)-2)
@@ -1520,59 +1727,201 @@ class RRTPlanner():
                         back_computation_time = 0.0
                         start_time = time.time()
                         path_back = self.find_reverse_path(retreat_node.get_state(), self.tree, optimize=True, obstacle_check=obstacle_check)
-                        if len(path_back) ==0:
-                            path_back = self.final_node.get_return_path()
+                        if len(path_back) == 0:
+                            self._node.get_logger().warn("No reverse path found, trying without optimization")
+                            path_back = retreat_node.get_return_path()
                         end_time = time.time()
+                        self._node.get_logger().info(f"Path back length: {len(path_back)}")
+
+                        self.dubins_wp_visualize( self.path[0:retreat_index+1], path_back, obstacle_check=obstacle_check)
+                        # path_back = self.find_reverse_path(retreat_node.get_state(), self.tree, optimize=True, obstacle_check=obstacle_check)
+                        # if len(path_back) ==0:
+                        #     path_back = self.find_reverse_path(retreat_node.get_state(), self.tree, optimize=False, obstacle_check=obstacle_check)
+                        # end_time = time.time()
                         back_computation_time = end_time - start_time
+                        # back_computation_time = self.back_computation_time
                         path_back_length, arc_length_back = self.compute_path_cost(path_back)
                         metrics_safe.append({ 
                             "path_length": path_length,
-                            "path_length": path_back_length,
+                            "path_back_length": path_back_length,
                             "computation_time": compute_time,
                             "back_computation_time" : back_computation_time,  
                         })
+                        self._node.get_logger().info(f"Path length: {path_length}, Path back length: {path_back_length}, Computation time: {compute_time}, Back computation time: {back_computation_time}")
+                        # self._node.get_logger().info(f"Path length: {path_length}, Path back length: {path_back_length}, Computation time: {compute_time}, Back computation time: {back_computation_time}")
 
                     else:
                         old_start = self.start
+                        old_limit = self.iteration_limit
                         #find waypoint about x% from the start(60)(extract from goal message, use the fact that they're equally spaced)
                         #pick random waypoint from path that and assume we spent 40 perc of the battery getting there
                         
                         self.start = retreat_node.get_state()
+                        self.iteration_limit = 1000
                         # start = (32, 0, 0, 0)
                         # start = self.start
                         self.goal = old_start
                         #run rrt* back to start from there
                         self.initialize_tree(self.start)
                         start_time  = time.time()
-                        goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=True,baseline=baseline, passage_bias = False, rewire = False)
-                        
+                        goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=True,baseline=baseline, passage_bias = False, rewire = True)
+                        back_computation_time = self.back_computation_time
                         end_time = time.time()
                         back_computation_time = end_time - start_time
                         # get metrics(path length, what else??????)
                         if len(goal_msg) == 0:
                             self._node.get_logger().warn("No path found back to start")
-                            path_back_length = np.inf
-                            
+                            path_length_back = np.inf
                         else:
                             path_length_back, arc_length = self.compute_path_cost(self.path)
                         metrics_baseline.append({
                             "path_length": path_length,
-                            "path_length_back": path_length_back,
+                            "path_back_length": path_length_back,
                             "computation_time": compute_time,
                             "back_computation_time" : back_computation_time
                         })
                         self.start = old_start
+                        self.iteration_limit = old_limit
                         # start = old_start
                         self.goal = goal
-                if baseline:
-                    metrics_baseline_df = pd.DataFrame(metrics_baseline)
-                    metrics_baseline_df.to_csv("metrics_baseline.csv", index=False)
-                    self._node.get_logger().info("Metrics saved to metrics_baseline.csv")
-                else:
-                    metrics_safe_df = pd.DataFrame(metrics_safe)
-                    metrics_safe_df.to_csv("metrics_safe.csv", index=False)
-                    self._node.get_logger().info("Metrics saved to metrics_safe.csv")
-    
+                # if baseline:
+                metrics_baseline_df = pd.DataFrame(metrics_baseline)
+                metrics_baseline_df.to_csv("metrics_baseline.csv", index=False)
+                self._node.get_logger().info("Metrics saved to metrics_baseline.csv")
+                # else:
+                metrics_safe_df = pd.DataFrame(metrics_safe)
+                metrics_safe_df.to_csv("metrics_safe.csv", index=False)
+                self._node.get_logger().info("Metrics saved to metrics_safe.csv")
+
+    def reconnect_evaluate(self ):
+        """Reconnect to the tree and evaluate the path"""
+        start = None
+        obstacle_check=False
+        # get initial orientation
+        # if not self.obstacles_populated: #will temporarily stay here
+        #     self.get_obstacles_from_tf()
+        #     if not obstacle_check:
+        #         self.obstacles_populated = True
+        #     if not self.obstacles_populated:
+        #         return
+        if not self.get_pose()[0]:
+            self._node.get_logger().info("Waiting for initial pose")
+            return
+
+        else:
+            if self.start[3] is None:
+                self.start = (self.get_pose()[0], self.get_pose()[1], 0, self.get_pose()[2]) 
+                self._node.get_logger().info(f"Initial pose: {self.start}")
+                start = self.start
+                metrics = []
+                all_trials_data = [] 
+                # self.iteration_limits = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+                # iter_length = len(self.iteration_limits)
+                #evaluate length and comp time for a range of goals
+                n_trials = 1000
+                reconnect_log = []
+                # print(int(n_trials/len(self.iteration_limits)))
+                for trial in range(n_trials):
+                    
+                    self._node.get_logger().info(f"Trial {trial + 1}/{n_trials}")
+                    self.initialize_tree(self.start)
+                    #maybe RRT here
+                    # self._node.get_logger().info("Running RRT")
+                    #first wp
+                    # self._node.get_logger().info("Sending Goal") 
+                    goal = (random.uniform(30, 100), random.uniform(-50, 50), 0, random.uniform(-180, 180))
+                    self.goal = goal
+                    # self.verbose_back = False
+                    self.goal_msg, final_waypoint_bool = self.run_rrt(start,goal, obstacle_check=obstacle_check)
+                    
+                    if len(self.path) <4:
+                        self._node.get_logger().info("Final waypoint reached")
+                        continue
+                    #pick random waypoint to reconnect from    
+                    reconnect_index = random.randint(1, len(self.path)-3)
+                    reconnect_node = self.path[reconnect_index]
+                    next_node = self.path[reconnect_index+1]
+                    self._node.get_logger().info(f"Next node state: {next_node.get_state()}")
+                    
+                    next_next_node = self.path[reconnect_index+2]
+                    self._node.get_logger().info(f"Next next node state: {next_next_node.get_state()}")
+
+                    # if next_node or next_next_node is None:
+                    #     self._node.get_logger().info("Next node is None, skipping trial")
+                    #     continue
+                    #now we add random obstacle 
+                    #make this int
+                    obstacle_spawn_index = int((self.original_wp_indices[reconnect_index+1] + self.original_wp_indices[reconnect_index+2])/2)
+                    # self._node.get_logger().info(f"Obstacle spawn index: {obstacle_spawn_index} and length of goal_msg: {len(self.goal_msg)}")
+                    obstacle_spawn_point = self.full_goal_msg[obstacle_spawn_index]
+                    self.obstacles.append((obstacle_spawn_point[0], obstacle_spawn_point[1], 0.0, 5.0)) #radius of 5.0
+                    obstacle_positions = np.array([[obs[0], obs[1], obs[2]] for obs in self.obstacles])
+                    self.obstacle_tree = KDTree(obstacle_positions)
+                    reconnect_state = reconnect_node.get_state()
+                    #now disturbed state is normal distribution about the state
+                    disturbed_state = [
+                        reconnect_state[0] + np.random.normal(0, 3.0),
+                        reconnect_state[1] + np.random.normal(0, 3.0),
+                        reconnect_state[2] , 
+                        reconnect_state[3] + np.random.normal(0, 60) 
+                    ]
+
+                    self._node.get_logger().info(f"Disturbed state: {disturbed_state} and original state: {reconnect_state}")
+                    # self.verbose_back = True
+                    self.plot_name = f"reconnect_visualization_no_obstacle_trial_{trial+1}"
+                    start_time  = time.time()
+                    try : 
+                        self.goal_msg, final_waypoint_bool = self.reconnect_to_tree(disturbed_state, obstacle_check=obstacle_check)
+                    except Exception as e:
+                        self._node.get_logger().error(f"Error during reconnection: {e}")
+                        continue
+                    end_time = time.time()
+                    if len(self.goal_msg) <2:
+                        self._node.get_logger().info("Can't reconnect")
+                        continue
+
+                    obstacle_check = True
+                    self.plot_name = f"reconnect_visualization_yes_obstacle_trial_{trial+1}"
+                    start_time  = time.time()
+                    try:
+                        self.goal_msg, final_waypoint_bool = self.reconnect_to_tree(disturbed_state, obstacle_check=obstacle_check)
+                    except : 
+                        self._node.get_logger().error("Error during reconnection with obstacles")
+                        self.goal_msg = []
+                    end_time = time.time() 
+                    obstacle_check = False
+                    if len(self.goal_msg) <2:
+                        self._node.get_logger().info("Can't reconnect")
+                        reconnect = False
+                    else:
+                        reconnect = True
+                    # path_length, arc_length = self.compute_path_cost(self.path)
+                    reconnect_log.append((trial+1, reconnect, end_time - start_time, len(self.path))) #not len but sumn
+                    self.obstacles.clear()
+                reconnect_metric = pd.DataFrame(reconnect_log, columns=['trial', 'reconnect_success', 'computation_time', 'path_length'])
+                reconnect_metric.to_csv("reconnect_log.csv", index=False)
+                self._node.get_logger().info("Metrics saved to reconnect_log.csv")
+
+    def dubins_wp_visualize(self, path_forward, path_backward, obstacle_check=False):
+        """Compute Dubins waypoints for both forward and backward paths."""
+        path_forward = self.path
+        dubins_input_forward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_forward 
+                if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None]
+        if obstacle_check:
+            dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+        else:
+            dubins_out_forward, original_indices = sample_complete_plan(dubins_input_forward, self.turning_radius, self.step_dubins)
+            
+        self.original_wp_indices = [int(i) for i in original_indices]
+        dubins_input_backward = [Waypoint(p[0], p[1], p[3]) for waypoint_node in path_backward
+                    if (p := np.array(waypoint_node.get_state(), dtype=np.float64)) is not None] 
+        if obstacle_check:
+            dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins, self.obstacles, self.obstacle_tree)
+        else:
+            dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
+        self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path_forward, visualize_back=True)
+        self.visualize_tree(np.array([]),np.array(dubins_out_backward), path_forward, visualize_back=True)
+
     def plot_path_and_uncertainty_vs_lambda(self, stat_table):
         lambdas = sorted(stat_table.keys())
         path_lengths = [np.mean(stat_table[lam]['path_lengths']) for lam in lambdas]
