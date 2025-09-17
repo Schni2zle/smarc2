@@ -187,7 +187,7 @@ class RRTPlanner():
         rewire_count = 0
         self.final_path_back = []
         final_node = None
-        dubins_optimize = False
+        dubins_optimize = True
         # self.sam_states.check_state() # this can provide the start position for the this iteration
         start_time = time.time()
         for iter in range(10000):  # Max iterations 
@@ -311,7 +311,7 @@ class RRTPlanner():
                 dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
             old_time = time.time()
             self.plot_name = f"before_rewiring_{time.time()}"
-            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True, save= True) #VISUALIZATIONS
+            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=False, save= True) #VISUALIZATIONS
         # else:
         #     self.visualize_tree(np.array(dubins_out_forward),np.array([]), path, visualize_back=False)
         if len(path) == 2:
@@ -341,13 +341,15 @@ class RRTPlanner():
                         cost, arc_length = self.compute_path_cost(self.path)
                         self.log_rewire.append((rewire_iter, cost/length, arc_length/cost*100, self.rewire_count))
                         self._node.get_logger().info(f"Rewiring iteration: {rewire_iter} and rewire count: {self.rewire_count}")
+                        self.assign_shortest_path()
                         self.expanded = False
+
                     # self._node.get_logger().info(f"Rewiring iteration: {rewire_iter}")
                 self._node.get_logger().info(f"Time taken to generate path: {time.time() - start_time}")
                 self.iteration_count = rewire_iter if rewire else 0
                 self._node.get_logger().info(f"Total rewiring iterations: {rewire_iter}")
 
-                self.assign_shortest_path()
+                
                 self._node.get_logger().info(f"Generated path with {len(self.path)} waypoints and rewired {self.rewire_count} times")
             # for node in self.tree.get_nodes():
                 # self._node.get_logger().info(f"cost : {node.get_cost()}")
@@ -383,9 +385,9 @@ class RRTPlanner():
             else:
                 dubins_out_backward, _ = sample_complete_plan(dubins_input_backward, self.turning_radius, self.step_dubins)
                 self.plot_name = f"after_rewiring_{old_time}"
-            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=True, save=True) #VISUALIZATIONS
-        # else:
-        #     self.visualize_tree(np.array(dubins_out_forward),np.array([]), path, visualize_back=False)
+            self.visualize_tree(np.array(dubins_out_forward),np.array(dubins_out_backward), path, visualize_back=False, save=True) #VISUALIZATIONS
+        else:
+            self.visualize_tree(np.array(dubins_out_forward),np.array([]), path, visualize_back=False)
         self._node.get_logger().info(f"the original indices : {original_indices}")
         
         # give waypoints till the first original index to fawllow
@@ -1656,7 +1658,7 @@ class RRTPlanner():
     def scenario_manager(self):
         """ Evaluate the planner """
         start = None
-        baseline = False
+        baseline = True
         obstacle_check = True
         #get initial orientation
         if not self.obstacles_populated: #will temporarily stay here
@@ -1676,7 +1678,7 @@ class RRTPlanner():
                 metrics_baseline= []
                 metrics_safe = []
                 #evaluate length and comp time for a range of goals
-                n_trials = 2
+                n_trials = 10
                 for trial in range(n_trials):
                     # self._node.get_logger().info("Train GP Model")
                     #train
@@ -1757,7 +1759,7 @@ class RRTPlanner():
                         #pick random waypoint from path that and assume we spent 40 perc of the battery getting there
                         
                         self.start = retreat_node.get_state()
-                        self.iteration_limit = 1000
+                        # self.iteration_limit = 1000
                         # start = (32, 0, 0, 0)
                         # start = self.start
                         self.goal = old_start

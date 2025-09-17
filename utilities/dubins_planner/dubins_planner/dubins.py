@@ -8,7 +8,7 @@ import math
 import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
-
+from scipy.spatial import cKDTree, KDTree
 
 class TurnType(Enum):
     LSL = 1
@@ -388,6 +388,9 @@ def sample_complete_plan(waypoints, turn_radius, step, obstacle_list = None, obs
             sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step, obstacle_list, obstacle_tree)
         else:
             sampled = sample_between_wps(curr_wp, next_wp, turn_radius, step)
+        if len(sampled) == 0:
+            # If no sampled points, just add the current waypoint
+            return [], []
         original_wp_indices.append(len(complete_path))
         complete_path.append((curr_wp.x, curr_wp.y, curr_wp.psi))
         complete_path.extend(sampled)
@@ -404,20 +407,26 @@ def main():
     # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
     # waypoints = np.array([[0,0],[0,10],[10,10],[10,0],[0,0]])
     # waypoints, angles = waypoints_with_yaw(waypoints)
-    wp1 = Waypoint(-10,0,0)
-    wp2 = Waypoint(10,0,0)
+    wp1 = Waypoint(-0.1,0,0)
+    wp2 = Waypoint(10.1,0,0)
     waypoints = [wp1, wp2]
     turn_radius = 10
     step = 5
-    obstacle_list = [(5,5,0,5)]
-    # param = calc_dubins_path(wp1, wp2, turn_radius, obstacle_list)
-    param = calc_dubins_path(wp1, wp2, turn_radius)
+    obstacle_list = [(5,0,0,5)]
+    obstacle_positions = np.array([[obs[0], obs[1], obs[2]] for obs in obstacle_list])
+            # self.obstacle_tree = cKDTree(obstacle_positions)
+    obstacle_tree = KDTree(obstacle_positions)
+    param = calc_dubins_path(wp1, wp2, turn_radius, obstacle_list, obstacle_tree=obstacle_tree)
+    # param = calc_dubins_path(wp1, wp2, turn_radius)
 
     print(param.type)
     print(param.seg_final)
     print(sum(param.seg_final))
-    # complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step, obstacle_list)
-    complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step)
+    complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step, obstacle_list, obstacle_tree=obstacle_tree)
+    # complete_path, original_wp_indices = sample_complete_plan(waypoints, turn_radius, step)
+    if complete_path == []:
+        print("No path found")
+        return
     
     print(complete_path)
     # print(original_wp_indices)
